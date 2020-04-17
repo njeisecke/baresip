@@ -27,6 +27,9 @@ struct auplay_st {
 	size_t sampsz;
 	auplay_write_h *wh;
 	void *arg;
+	HANDLE thread;
+	volatile bool run;
+	CRITICAL_SECTION crit;
 };
 
 
@@ -35,14 +38,13 @@ static void auplay_destructor(void *arg)
 	struct auplay_st *st = arg;
 	int i;
 
-	st->wh = NULL;
+	if (st->run) {
+		st->run = false;
+		(void)WaitForSingleObject(st->thread, INFINITE);
+	}
 
-	/* Mark the device for closing, and wait for all the
-	 * buffers to be returned by the driver
-	 */
-	st->rdy = false;
-	while (st->inuse > 0)
-		Sleep(50);
+	st->wh = NULL;
+	// st->rdy = false;
 
 	waveOutReset(st->waveout);
 
@@ -56,40 +58,55 @@ static void auplay_destructor(void *arg)
 }
 
 
-static int dsp_write(struct auplay_st *st)
+static DWORD WINAPI dsp_write(LPVOID arg)
 {
+	struct auplay_st *st = (struct auplay_st *)arg;
 	MMRESULT res;
 	WAVEHDR *wh;
 	struct mbuf *mb;
+	size_t inuse;
 
-	if (!st->rdy)
-		return EINVAL;
+	while (st->run) {
+		Sleep(5);
 
-	wh = &st->bufs[st->pos].wh;
-	if (wh->dwFlags & WHDR_PREPARED) {
-		return EINVAL;
+		EnterCriticalSection(&st->crit);
+		inuse = st->inuse;
+		LeaveCriticalSection(&st->crit);
+
+		if (!st->rdy)
+			continue;
+
+		if (inuse == WRITE_BUFFERS)
+			continue;
+
+		wh = &st->bufs[st->pos].wh;
+		if (wh->dwFlags & WHDR_PREPARED)
+			waveOutUnprepareHeader(st->waveout, wh, sizeof(*wh));
+
+		mb = st->bufs[st->pos].mb;
+		wh->lpData = (LPSTR)mb->buf;
+
+		if (st->wh)
+			st->wh((void *)mb->buf, mb->size/2, st->arg);
+
+		wh->dwBufferLength = mb->size;
+		wh->dwFlags = 0;
+		wh->dwUser = (DWORD_PTR)mb;
+
+		waveOutPrepareHeader(st->waveout, wh, sizeof(*wh));
+
+		INC_WPOS(st->pos);
+
+		res = waveOutWrite(st->waveout, wh, sizeof(*wh));
+		if (res != MMSYSERR_NOERROR)
+			warning("winwave: dsp_write: waveOutWrite: failed: %d\n", res);
+		else {
+			EnterCriticalSection(&st->crit);
+			st->inuse++;
+			LeaveCriticalSection(&st->crit);
+		}
+
 	}
-
-	mb = st->bufs[st->pos].mb;
-	wh->lpData = (LPSTR)mb->buf;
-
-	if (st->wh) {
-		st->wh((void *)mb->buf, mb->size/st->sampsz, st->arg);
-	}
-
-	wh->dwBufferLength = mb->size;
-	wh->dwFlags = 0;
-
-	waveOutPrepareHeader(st->waveout, wh, sizeof(*wh));
-
-	INC_WPOS(st->pos);
-
-	res = waveOutWrite(st->waveout, wh, sizeof(*wh));
-	if (res != MMSYSERR_NOERROR)
-		warning("winwave: dsp_write: waveOutWrite: failed: %08x\n",
-			res);
-	else
-		st->inuse++;
 
 	return 0;
 }
@@ -102,7 +119,6 @@ static void CALLBACK waveOutCallback(HWAVEOUT hwo,
 				     DWORD_PTR dwParam2)
 {
 	struct auplay_st *st = (struct auplay_st *)dwInstance;
-	WAVEHDR *wh = (WAVEHDR *)dwParam1;
 
 	(void)hwo;
 	(void)dwParam2;
@@ -114,11 +130,9 @@ static void CALLBACK waveOutCallback(HWAVEOUT hwo,
 		break;
 
 	case WOM_DONE:
-		/*LOCK();*/
-		waveOutUnprepareHeader(st->waveout, wh, sizeof(*wh));
-		/*UNLOCK();*/
+		EnterCriticalSection(&st->crit);
 		st->inuse--;
-		dsp_write(st);
+		LeaveCriticalSection(&st->crit);
 		break;
 
 	case WOM_CLOSE:
@@ -220,7 +234,7 @@ int winwave_play_alloc(struct auplay_st **stp, const struct auplay *ap,
 		       auplay_write_h *wh, void *arg)
 {
 	struct auplay_st *st;
-	int i, err;
+	int err;
 	unsigned int dev;
 
 	if (!stp || !ap || !prm)
@@ -238,17 +252,20 @@ int winwave_play_alloc(struct auplay_st **stp, const struct auplay *ap,
 	st->wh  = wh;
 	st->arg = arg;
 
+	InitializeCriticalSection(&st->crit);
+
 	err = write_stream_open(st, prm, dev);
 	if (err)
 		goto out;
 
-	/* The write runs at 100ms intervals
-	 * prepare enough buffers to suite its needs
-	 */
-	for (i = 0; i < WRITE_BUFFERS; i++)
-		dsp_write(st);
+	st->run = true;
+	st->thread = CreateThread(NULL, 0, dsp_write, st, 0, NULL);
+	if (!st->thread) {
+		st->run = false;
+		err = ENOMEM;
+	}
 
- out:
+out:
 	if (err)
 		mem_deref(st);
 	else
