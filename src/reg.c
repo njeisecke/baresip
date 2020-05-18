@@ -426,8 +426,12 @@ const struct sa *reg_laddr(const struct reg *reg)
 	return sipreg_laddr(reg->sipreg);
 }
 
-
 const struct sa *reg_paddr(const struct reg *reg)
 {
 	return reg ? &reg->paddr : NULL;
+}
+
+const struct sa *reg_raddr(const struct reg *reg)
+{
+	return sipreg_raddr(reg->sipreg);
 }
