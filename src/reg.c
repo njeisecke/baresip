@@ -344,3 +344,8 @@ int reg_af(const struct reg *reg)
 
 	return reg->af;
 }
+
+struct sa *reg_raddr(const struct reg *reg)
+{
+	return sipreg_raddr(reg->sipreg);
+}
