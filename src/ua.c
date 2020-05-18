@@ -1473,6 +1473,23 @@ const char *ua_cuser(const struct ua *ua)
 	return ua->cuser;
 }
 
+struct sa *ua_raddr(const struct ua *ua)
+{
+	struct le *le;
+	int i;
+
+	if (!ua)
+		return NULL;
+
+	for (le = ua->regl.head, i=0; le; le = le->next, i++) {
+		struct reg *reg = le->data;
+		struct sa *raddr = reg_raddr(reg);
+		if (raddr)
+			return raddr;
+	}
+
+	return NULL;
+}
 
 /**
  * Get the local contact username
