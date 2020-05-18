@@ -918,6 +918,7 @@ unsigned ua_destroy(struct ua *ua);
 void ua_pub_gruu_set(struct ua *ua, const struct pl *pval);
 const char     *ua_cuser(const struct ua *ua);
 const char     *ua_local_cuser(const struct ua *ua);
+const struct sa *ua_raddr(const struct ua *ua);
 struct account *ua_account(const struct ua *ua);
 const char     *ua_outbound(const struct ua *ua);
 struct call    *ua_call(const struct ua *ua);
