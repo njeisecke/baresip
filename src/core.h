@@ -222,6 +222,7 @@ bool reg_isok(const struct reg *reg);
 int  reg_debug(struct re_printf *pf, const struct reg *reg);
 int  reg_status(struct re_printf *pf, const struct reg *reg);
 int  reg_af(const struct reg *reg);
+struct sa *reg_raddr(const struct reg *reg);
 
 
 /*

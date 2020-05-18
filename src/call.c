@@ -696,6 +696,7 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 	bool use_video = true, got_offer = false;
 	int label = 0;
 	int err = 0;
+	struct sa *raddr;
 
 	if (!cfg || !local_uri || !acc || !ua || !prm)
 		return EINVAL;
@@ -732,8 +733,13 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 	if (err)
 		goto out;
 
+	/* if rport/received was set, use this. This is not 100% correct because
+	 * only the ip address ("received") will be used but not the port (which
+	 * would be the SIP port and not the RTP port anyway). */
+	raddr = ua_raddr(ua);
+
 	/* Init SDP info */
-	err = sdp_session_alloc(&call->sdp, &prm->laddr);
+	err = sdp_session_alloc(&call->sdp, sa_isset(raddr, SA_ADDR | SA_PORT) ? raddr : &prm->laddr);
 	if (err)
 		goto out;
 
@@ -1716,7 +1722,9 @@ int call_accept(struct call *call, struct sipsess_sock *sess_sock,
 	}
 
 	err = sipsess_accept(&call->sess, sess_sock, msg, 180, "Ringing",
-			     ua_cuser(call->ua), "application/sdp", NULL,
+			     ua_cuser(call->ua),
+			     ua_raddr(call->ua),
+			     "application/sdp", NULL,
 			     auth_handler, call->acc, true,
 			     sipsess_offer_handler, sipsess_answer_handler,
 			     sipsess_estab_handler, sipsess_info_handler,
@@ -1836,6 +1844,7 @@ static int send_invite(struct call *call)
 			      call->local_name,
 			      call->local_uri,
 			      ua_cuser(call->ua),
+			      ua_raddr(call->ua),
 			      routev[0] ? routev : NULL,
 			      routev[0] ? 1 : 0,
 			      "application/sdp", desc,
