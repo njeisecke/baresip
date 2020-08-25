@@ -41,3 +41,11 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 
 uint32_t audiounit_aufmt_to_formatflags(enum aufmt fmt);
+
+int audiounit_player_init(struct auplay *ap);
+int audiounit_recorder_init(struct ausrc *as);
+
+#if ! TARGET_OS_IPHONE
+int audiounit_enum_devices(const char *name, struct list *dev_list,
+			   AudioDeviceID *matching_device_id, Boolean *match_found, Boolean is_input);
+#endif
