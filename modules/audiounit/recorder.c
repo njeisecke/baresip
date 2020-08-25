@@ -215,8 +215,10 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	int err;
 
 	(void)ctx;
-	(void)device;
 	(void)errh;
+#if TARGET_OS_IPHONE
+	(void)device;
+#endif
 
 	if (!stp || !as || !prm)
 		return EINVAL;
@@ -270,19 +272,41 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (ret)
 		goto out;
 
-	ret = AudioObjectGetPropertyData(kAudioObjectSystemObject,
-			&auAddress,
-			0,
-			NULL,
-			&ausize,
-			&inputDevice);
-	if (ret)
-		goto out;
+	if (str_isset(device) && 0 != str_casecmp(device, "default")) {
+
+		AudioDeviceID matchingDeviceId;
+		Boolean matchFound;
+
+		info("audiounit: recorder: using device '%s'\n", device);
+
+		err = audiounit_enum_devices(device, NULL, &matchingDeviceId, &matchFound, true);
+		if (err)
+			goto out;
+
+		if (!matchFound) {
+			warning("audiounit: recorder: device not found:"
+				" '%s'\n", device);
+			err = ENODEV;
+			goto out;
+		}
+
+		inputDevice = matchingDeviceId;
+	}
+	else {
+		ret = AudioObjectGetPropertyData(kAudioObjectSystemObject,
+				&auAddress,
+				0,
+				NULL,
+				&ausize,
+				&inputDevice);
+		if (ret)
+			goto out;
+	}
 
 	ret = AudioUnitSetProperty(st->au_in,
 			kAudioOutputUnitProperty_CurrentDevice,
 			kAudioUnitScope_Global,
-			0,
+			defaultBus,
 			&inputDevice,
 			sizeof(inputDevice));
 	if (ret)
@@ -450,4 +474,14 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		*stp = st;
 
 	return err;
+}
+
+int audiounit_recorder_init(struct ausrc *ap)
+{
+	if (!ap)
+		return EINVAL;
+
+	list_init(&ap->dev_list);
+
+	return audiounit_enum_devices(NULL, &ap->dev_list, NULL, NULL, true);
 }

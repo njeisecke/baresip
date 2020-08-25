@@ -102,7 +102,9 @@ int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 	UInt32 hw_size = sizeof(hw_srate);
 	int err;
 
+#if TARGET_OS_IPHONE
 	(void)device;
+#endif
 
 	if (!stp || !ap || !prm)
 		return EINVAL;
@@ -140,6 +142,39 @@ int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 		warning("audiounit: EnableIO failed (%d)\n", ret);
 		goto out;
 	}
+
+#if ! TARGET_OS_IPHONE
+	if (str_isset(device) && 0 != str_casecmp(device, "default")) {
+
+		AudioDeviceID matchingDeviceId;
+		Boolean matchFound;
+		AudioDeviceID outputDevice;
+
+		info("audiounit: player: using device '%s'\n", device);
+
+		err = audiounit_enum_devices(device, NULL, &matchingDeviceId, &matchFound, false);
+		if (err)
+			goto out;
+
+		if (!matchFound) {
+			warning("audiounit: player: device not found:"
+				" '%s'\n", device);
+			err = ENODEV;
+			goto out;
+		}
+
+		outputDevice = matchingDeviceId;
+
+		ret = AudioUnitSetProperty(st->au,
+				kAudioOutputUnitProperty_CurrentDevice,
+				kAudioUnitScope_Global,
+				outputBus,
+				&outputDevice,
+				sizeof(outputDevice));
+		if (ret)
+			goto out;
+	}
+#endif
 
 	fmt.mSampleRate       = prm->srate;
 	fmt.mFormatID         = kAudioFormatLinearPCM;
@@ -205,4 +240,14 @@ int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 		*stp = st;
 
 	return err;
+}
+
+int audiounit_player_init(struct auplay *ap)
+{
+	if (!ap)
+		return EINVAL;
+
+	list_init(&ap->dev_list);
+
+	return audiounit_enum_devices(NULL, &ap->dev_list, NULL, NULL, false);
 }
