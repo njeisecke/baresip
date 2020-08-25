@@ -199,6 +199,11 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		kAudioHardwarePropertyDefaultInputDevice,
 		kAudioObjectPropertyScopeGlobal,
 		kAudioObjectPropertyElementMain };
+
+	UInt32 size = sizeof(UInt32);
+	AudioValueRange bufferRange;
+	UInt32 numberOfFramesReq;
+	uint32_t sampc;
 #endif
 	Float64 hw_srate = 0.0;
 	UInt32 hw_size = sizeof(hw_srate);
@@ -367,6 +372,47 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 				   sizeof(fmt_app));
 	if (ret)
 		goto out;
+
+#if ! TARGET_OS_IPHONE
+	/* query the available frame range which depends on the actual
+	 * device. */
+	size = sizeof(AudioValueRange);
+	ret = AudioUnitGetProperty(st->au_in,
+				   kAudioDevicePropertyBufferFrameSizeRange,
+				   kAudioUnitScope_Global,
+				   defaultBus,
+				   &bufferRange,
+				   &size);
+	if (ret) {
+		warning("audiounit: record: Error getting buffer ranges: %i\n",
+			ret);
+		goto out;
+	}
+
+	/* set the ideal number of frames within the valid range
+	 * (for ptime=20 this would be 160 frames). The default seems
+	 * to be 500 frames which causes unnecessary latency. */
+	sampc = prm->srate * prm->ch * prm->ptime / 1000;
+	numberOfFramesReq =
+			sampc < bufferRange.mMinimum
+			? bufferRange.mMinimum
+			: sampc > bufferRange.mMaximum
+			  ? bufferRange.mMaximum
+			  : sampc;
+
+	ret = AudioUnitSetProperty(st->au_in,
+				   kAudioDevicePropertyBufferFrameSize,
+				   kAudioUnitScope_Global,
+				   defaultBus,
+				   &numberOfFramesReq,
+				   sizeof(UInt32));
+
+	if (ret) {
+		warning("audiounit: record: Error setting number of requested "
+			"frames: %i\n", ret);
+		goto out;
+	}
+#endif
 
 	cb_conv.inputProc = convert_callback;
 	cb_conv.inputProcRefCon = st;
