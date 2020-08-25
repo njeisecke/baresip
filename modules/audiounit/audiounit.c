@@ -133,6 +133,150 @@ uint32_t audiounit_aufmt_to_formatflags(enum aufmt fmt)
 	}
 }
 
+#if ! TARGET_OS_IPHONE
+int audiounit_enum_devices(const char *name, struct list *dev_list,
+			   AudioDeviceID *matching_device_id, Boolean *match_found, Boolean is_input)
+{
+	AudioObjectPropertyAddress propertyAddress = {
+		kAudioHardwarePropertyDevices,
+		kAudioObjectPropertyScopeGlobal,
+		kAudioObjectPropertyElementMaster
+	};
+
+	AudioDeviceID *audioDevices = NULL;
+	UInt32 dataSize = 0;
+	UInt32 deviceCount;
+	OSStatus status;
+
+	int err = 0;
+
+	if (!dev_list && !matching_device_id)
+		return EINVAL;
+
+	if (matching_device_id && NULL == match_found)
+		return EINVAL;
+
+	if (NULL == matching_device_id && match_found)
+		return EINVAL;
+
+	if (match_found)
+		*match_found = false;
+
+	if (matching_device_id || match_found) {
+		if (!str_isset(name))
+			return 0;
+	}
+
+	status = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject,
+						&propertyAddress,
+						0,
+						NULL,
+						&dataSize);
+	if (kAudioHardwareNoError != status) {
+		warning("AudioObjectGetPropertyDataSize"
+			" (kAudioHardwarePropertyDevices) failed: %i\n",
+			status);
+		err = ENODEV;
+		goto out;
+	}
+
+	deviceCount = dataSize / sizeof(AudioDeviceID);
+
+	audioDevices = mem_zalloc(dataSize, NULL);
+	if (NULL == audioDevices) {
+		err = ENOMEM;
+		goto out;
+	}
+
+	status = AudioObjectGetPropertyData(kAudioObjectSystemObject,
+					    &propertyAddress,
+					    0,
+					    NULL,
+					    &dataSize,
+					    audioDevices);
+	if (kAudioHardwareNoError != status) {
+		warning("AudioObjectGetPropertyData"
+			" (kAudioHardwarePropertyDevices) failed: %i\n",
+			status);
+		err = ENODEV;
+		goto out;
+	}
+
+	if (is_input)
+		propertyAddress.mScope = kAudioDevicePropertyScopeInput;
+	else
+		propertyAddress.mScope = kAudioDevicePropertyScopeOutput;
+
+	for (UInt32 i = 0; i < deviceCount; ++i) {
+
+		CFStringRef deviceName = NULL;
+		const char *name_str;
+		/* fallback if CFStringGetCStringPtr fails */
+		char name_buf[64];
+
+		propertyAddress.mSelector   = kAudioDevicePropertyStreams;
+		status = AudioObjectGetPropertyDataSize(audioDevices[i],
+							&propertyAddress,
+							0,
+							NULL,
+							&dataSize);
+		if (dataSize == 0)
+			continue;
+
+		dataSize = sizeof(deviceName);
+		propertyAddress.mSelector =
+			kAudioDevicePropertyDeviceNameCFString;
+
+		status = AudioObjectGetPropertyData(audioDevices[i],
+						    &propertyAddress,
+						    0,
+						    NULL,
+						    &dataSize,
+						    &deviceName);
+		if (kAudioHardwareNoError != status) {
+			warning("AudioObjectGetPropertyData"
+				" (kAudioDevicePropertyDeviceNameCFString)"
+				" failed: %i\n", status);
+			continue;
+		}
+
+		name_str = CFStringGetCStringPtr(deviceName,
+						 kCFStringEncodingUTF8);
+
+		/* CFStringGetCStringPtr can and does fail
+		 * (documented behavior) */
+		if (0 == name_str) {
+			if (!CFStringGetCString(deviceName,
+						name_buf,
+						sizeof(name_buf),
+						kCFStringEncodingUTF8)) {
+				warning("CFStringGetCString "
+					" failed: %i\n", status);
+				continue;
+			}
+			name_str = name_buf;
+		}
+
+		if (matching_device_id) {
+			if (0 == str_casecmp(name, name_str)) {
+				*matching_device_id = audioDevices[i];
+				*match_found = true;
+				break;
+			}
+		}
+		else {
+			err = mediadev_add(dev_list, name_str);
+			if (err)
+				break;
+		}
+	}
+
+ out:
+	mem_deref(audioDevices);
+
+	return err;
+}
+#endif
 
 static int module_init(void)
 {
@@ -186,6 +330,10 @@ static int module_init(void)
 			       "audiounit", audiounit_player_alloc);
 	err |= ausrc_register(&ausrc, baresip_ausrcl(),
 			      "audiounit", audiounit_recorder_alloc);
+
+
+	err  = audiounit_player_init(auplay);
+	err |= audiounit_recorder_init(ausrc);
 
 	return err;
 }
