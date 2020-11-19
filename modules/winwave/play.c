@@ -37,16 +37,23 @@ static void auplay_destructor(void *arg)
 {
 	struct auplay_st *st = arg;
 	int i;
+	MMRESULT res;
+
+	debug("winwave play: destroying %p. stopping thread...\n", arg);
 
 	if (st->run) {
 		st->run = false;
 		(void)WaitForSingleObject(st->thread, INFINITE);
 	}
 
+	debug("winwave play: thread stopped\n");
+
 	st->wh = NULL;
 	// st->rdy = false;
 
 	waveOutReset(st->waveout);
+
+	debug("winwave play: release buffers...\n");
 
 	for (i = 0; i < WRITE_BUFFERS; i++) {
 		waveOutUnprepareHeader(st->waveout, &st->bufs[i].wh,
@@ -54,7 +61,13 @@ static void auplay_destructor(void *arg)
 		mem_deref(st->bufs[i].mb);
 	}
 
-	waveOutClose(st->waveout);
+	info("winwave play: close device...\n");
+
+	res = waveOutClose(st->waveout);
+	if (res != MMSYSERR_NOERROR)
+		debug("winwave play: error closing device %p %p res=%d\n", st, st->waveout, res);
+	else
+		debug("winwave play: device closed %p %p\n", st, st->waveout);
 
 	DeleteCriticalSection(&st->crit);
 }
@@ -161,7 +174,7 @@ static int write_stream_open(struct auplay_st *st,
 
 	format = winwave_get_format(prm->fmt);
 	if (format == WAVE_FORMAT_UNKNOWN) {
-		warning("winwave: playback: unsupported sample format (%s)\n",
+		warning("winwave play: unsupported sample format (%s)\n",
 			aufmt_name(prm->fmt));
 		return ENOTSUP;
 	}
@@ -193,9 +206,11 @@ static int write_stream_open(struct auplay_st *st,
 			  (DWORD_PTR) st,
 			  CALLBACK_FUNCTION | WAVE_FORMAT_DIRECT);
 	if (res != MMSYSERR_NOERROR) {
-		warning("winwave: waveOutOpen: failed %d\n", res);
+		warning("winwave play: waveOutOpen: failed %p res=%d\n", st, res);
 		return EINVAL;
 	}
+
+	debug("winwave play: device opened %p %p\n", st, st->waveout);
 
 	return 0;
 }
@@ -255,6 +270,8 @@ int winwave_play_alloc(struct auplay_st **stp, const struct auplay *ap,
 	st->arg = arg;
 
 	InitializeCriticalSection(&st->crit);
+
+	info("winwave play: open device %s %d %p...\n", device, dev, st);
 
 	err = write_stream_open(st, prm, dev);
 	if (err)
