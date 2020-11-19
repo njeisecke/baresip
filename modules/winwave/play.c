@@ -55,6 +55,8 @@ static void auplay_destructor(void *arg)
 	}
 
 	waveOutClose(st->waveout);
+
+	DeleteCriticalSection(&st->crit);
 }
 
 
