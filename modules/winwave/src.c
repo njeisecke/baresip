@@ -294,6 +294,8 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (!st->thread) {
 		st->run = false;
 		err = ENOMEM;
+	} else {
+		SetThreadPriority(st->thread, THREAD_PRIORITY_TIME_CRITICAL);
 	}
 
 out:
