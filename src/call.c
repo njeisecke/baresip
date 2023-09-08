@@ -2362,8 +2362,10 @@ static int sipsess_desc_handler(struct mbuf **descp, const struct sa *src,
 
 	MAGIC_CHECK(call);
 	call->af     = sa_af(src);
-	if (!call->acc->mnat)
-		sdp_session_set_laddr(call->sdp, src);
+
+    // macht das unser rport kaputt?
+//	if (!call->acc->mnat)
+//		sdp_session_set_laddr(call->sdp, src);
 
 	if (list_isempty(&call->streaml)) {
 		err = call_streams_alloc(call);
