@@ -2357,8 +2357,11 @@ static int sipsess_desc_handler(struct mbuf **descp, const struct sa *src,
 
 	MAGIC_CHECK(call);
 	call->af     = sa_af(src);
-	if (!call->acc->mnat)
-		sdp_session_set_laddr(call->sdp, src);
+
+    // temp. "Fix" für #15734: Das Setzen der laddr überschreibt hier unseren via
+    // rport eingetragenen Wert.
+//	if (!call->acc->mnat)
+//		sdp_session_set_laddr(call->sdp, src);
 
 	if (list_isempty(&call->streaml)) {
 		err = call_streams_alloc(call);
