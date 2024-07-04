@@ -26,9 +26,6 @@ struct ausrc_st {
 	struct ausrc_prm prm;
 	ausrc_read_h *rh;
 	void *arg;
-	HANDLE thread;
-	volatile bool run;
-	CRITICAL_SECTION crit;
 };
 
 
@@ -36,11 +33,6 @@ static void ausrc_destructor(void *arg)
 {
 	struct ausrc_st *st = arg;
 	int i;
-
-	if (st->run) {
-		st->run = false;
-		(void)WaitForSingleObject(st->thread, INFINITE);
-	}
 
 	st->rh = NULL;
 
@@ -54,66 +46,31 @@ static void ausrc_destructor(void *arg)
 	}
 
 	waveInClose(st->wavein);
-	DeleteCriticalSection(&st->crit);
 }
 
 
-static DWORD WINAPI add_wave_in(LPVOID arg)
+static int add_wave_in(struct ausrc_st *st)
 {
-	struct ausrc_st *st = (struct ausrc_st *)arg;
+	struct dspbuf *db = &st->bufs[st->pos];
+	WAVEHDR *wh = &db->wh;
 	MMRESULT res;
-	struct mbuf *mb;
-	WAVEHDR *wh;
-	size_t inuse;
-	struct auframe af;
 
-	while (st->run) {
-		Sleep(1);
+	wh->lpData          = (LPSTR)db->mb->buf;
+	wh->dwBufferLength  = db->mb->size;
+	wh->dwBytesRecorded = 0;
+	wh->dwFlags         = 0;
 
-		EnterCriticalSection(&st->crit);
-		inuse = st->inuse;
-		LeaveCriticalSection(&st->crit);
-
-		if (!st->rdy)
-			continue;
-
-		if (inuse == READ_BUFFERS)
-			continue;
-
-		wh = &st->bufs[st->pos].wh;
-		if (wh->dwFlags & WHDR_PREPARED)
-			waveInUnprepareHeader(st->wavein, wh, sizeof(*wh));
-
-		mb = st->bufs[st->pos].mb;
-		wh->lpData          = (LPSTR)mb->buf;
-
-		if (st->rh) {
-			auframe_init(&af, st->prm.fmt, (void *)wh->lpData,
-				     wh->dwBytesRecorded / st->sampsz, st->prm.srate,
-				     st->prm.ch);
-			af.timestamp = tmr_jiffies_usec();
-
-			st->rh(&af, st->arg);
-		}
-
-		wh->dwBufferLength  = mb->size;
-		wh->dwBytesRecorded = 0;
-		wh->dwFlags         = 0;
-		wh->dwUser          = (DWORD_PTR)mb;
-
-		waveInPrepareHeader(st->wavein, wh, sizeof(*wh));
-		INC_RPOS(st->pos);
-
-		res = waveInAddBuffer(st->wavein, wh, sizeof(*wh));
-		if (res != MMSYSERR_NOERROR)
-			warning("winwave: add_wave_in: waveInAddBuffer failed: %d\n", res);
-		else {
-			EnterCriticalSection(&st->crit);
-			st->inuse++;
-			LeaveCriticalSection(&st->crit);
-		}
-
+	waveInPrepareHeader(st->wavein, wh, sizeof(*wh));
+	res = waveInAddBuffer(st->wavein, wh, sizeof(*wh));
+	if (res != MMSYSERR_NOERROR) {
+		warning("winwave: add_wave_in: waveInAddBuffer fail: %08x\n",
+			res);
+		return ENOMEM;
 	}
+
+	INC_RPOS(st->pos);
+
+	st->inuse++;
 
 	return 0;
 }
@@ -126,10 +83,14 @@ static void CALLBACK waveInCallback(HWAVEOUT hwo,
 				    DWORD_PTR dwParam2)
 {
 	struct ausrc_st *st = (struct ausrc_st *)dwInstance;
+	WAVEHDR *wh = (WAVEHDR *)dwParam1;
+	struct auframe af;
 
 	(void)hwo;
-	(void)dwParam1;
 	(void)dwParam2;
+
+	if (!st->rh)
+		return;
 
 	switch (uMsg) {
 
@@ -142,9 +103,18 @@ static void CALLBACK waveInCallback(HWAVEOUT hwo,
 		break;
 
 	case WIM_DATA:
-		EnterCriticalSection(&st->crit);
+		if (st->inuse < (READ_BUFFERS-1))
+			add_wave_in(st);
+
+		auframe_init(&af, st->prm.fmt, (void *)wh->lpData,
+			     wh->dwBytesRecorded / st->sampsz, st->prm.srate,
+			     st->prm.ch);
+		af.timestamp = tmr_jiffies_usec();
+
+		st->rh(&af, st->arg);
+
+		waveInUnprepareHeader(st->wavein, wh, sizeof(*wh));
 		st->inuse--;
-		LeaveCriticalSection(&st->crit);
 		break;
 
 	default:
@@ -203,6 +173,10 @@ static int read_stream_open(struct ausrc_st *st, const struct ausrc_prm *prm,
 		return EINVAL;
 	}
 
+	/* Prepare enough IN buffers to suite at least 50ms of data */
+	for (i = 0; i < READ_BUFFERS; i++)
+		err |= add_wave_in(st);
+
 	waveInStart(st->wavein);
 
 	return err;
@@ -243,7 +217,7 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		      struct ausrc_prm *prm, const char *device,
 		      ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
-	struct ausrc_st *st = NULL;
+	struct ausrc_st *st;
 	int err;
 	unsigned int dev;
 
@@ -254,7 +228,7 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 	err = find_dev(device, &dev);
 	if (err)
-		goto out;
+		return err;
 
 	st = mem_zalloc(sizeof(*st), ausrc_destructor);
 	if (!st)
@@ -263,20 +237,7 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	st->rh  = rh;
 	st->arg = arg;
 
-	InitializeCriticalSection(&st->crit);
-
-	err = read_stream_open(st, prm, dev);
-	if (err)
-		goto out;
-
-	st->run = true;
-	st->thread = CreateThread(NULL, 0, add_wave_in, st, 0, NULL);
-	if (!st->thread) {
-		st->run = false;
-		err = ENOMEM;
-	}
-
-out:
+	err |= read_stream_open(st, prm, dev);
 
 	if (err)
 		mem_deref(st);
