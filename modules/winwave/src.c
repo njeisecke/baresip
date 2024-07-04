@@ -36,23 +36,16 @@ static void ausrc_destructor(void *arg)
 {
 	struct ausrc_st *st = arg;
 	int i;
-	MMRESULT res;
-
-	debug("winwave src: destroying %p. stopping thread...\n", arg);
 
 	if (st->run) {
 		st->run = false;
 		(void)WaitForSingleObject(st->thread, INFINITE);
 	}
 
-	debug("winwave src: thread stopped\n");
-
 	st->rh = NULL;
 
 	waveInStop(st->wavein);
 	waveInReset(st->wavein);
-
-	debug("winwave src: release buffers...\n");
 
 	for (i = 0; i < READ_BUFFERS; i++) {
 		waveInUnprepareHeader(st->wavein, &st->bufs[i].wh,
@@ -60,14 +53,7 @@ static void ausrc_destructor(void *arg)
 		mem_deref(st->bufs[i].mb);
 	}
 
-	info("winwave src: close device...\n");
-
-	res = waveInClose(st->wavein);
-	if (res != MMSYSERR_NOERROR)
-		debug("winwave src: error closing device %p %p res=%d\n", st, st->wavein, res);
-	else
-		debug("winwave src: device closed %p %p\n", st, st->wavein);
-
+	waveInClose(st->wavein);
 	DeleteCriticalSection(&st->crit);
 }
 
@@ -120,7 +106,7 @@ static DWORD WINAPI add_wave_in(LPVOID arg)
 
 		res = waveInAddBuffer(st->wavein, wh, sizeof(*wh));
 		if (res != MMSYSERR_NOERROR)
-			warning("winwave src: add_wave_in: waveInAddBuffer failed: %d\n", res);
+			warning("winwave: add_wave_in: waveInAddBuffer failed: %d\n", res);
 		else {
 			EnterCriticalSection(&st->crit);
 			st->inuse++;
@@ -180,7 +166,7 @@ static int read_stream_open(struct ausrc_st *st, const struct ausrc_prm *prm,
 
 	format = winwave_get_format(prm->fmt);
 	if (format == WAVE_FORMAT_UNKNOWN) {
-		warning("winwave src: source: unsupported sample format (%s)\n",
+		warning("winwave: source: unsupported sample format (%s)\n",
 			aufmt_name(prm->fmt));
 		return ENOTSUP;
 	}
@@ -213,11 +199,9 @@ static int read_stream_open(struct ausrc_st *st, const struct ausrc_prm *prm,
 			  (DWORD_PTR) st,
 			  CALLBACK_FUNCTION | WAVE_FORMAT_DIRECT);
 	if (res != MMSYSERR_NOERROR) {
-		warning("winwave src: waveInOpen: failed %p res=%d\n", st, res);
+		warning("winwave: waveInOpen: failed res=%d\n", res);
 		return EINVAL;
 	}
-
-	debug("winwave src: device opened %p %p\n", st, st->wavein);
 
 	waveInStart(st->wavein);
 
@@ -281,8 +265,6 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 	InitializeCriticalSection(&st->crit);
 
-	info("winwave src: open device %s %d %p...\n", device, dev, st);
-
 	err = read_stream_open(st, prm, dev);
 	if (err)
 		goto out;
@@ -296,10 +278,8 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 out:
 
-	if (err) {
-		warning("winwave src: failed opening device %p...\n", st);
+	if (err)
 		mem_deref(st);
-	}
 	else
 		*stp = st;
 
