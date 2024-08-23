@@ -15,6 +15,7 @@
 #define WRITE_BUFFERS  4
 #define INC_WPOS(a) ((a) = (((a) + 1) % WRITE_BUFFERS))
 
+void traceDeviceId(const char *marker, const unsigned char *data, size_t size);
 
 struct auplay_st {
 	struct dspbuf bufs[WRITE_BUFFERS];
@@ -260,6 +261,8 @@ int winwave_play_alloc(struct auplay_st **stp, const struct auplay *ap,
 
 	if (!stp || !ap || !prm)
 		return EINVAL;
+
+    traceDeviceId("winwav play deviceid", device, strlen(device));
 
 	err = find_dev(device, &dev);
 	if (err)

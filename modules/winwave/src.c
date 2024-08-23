@@ -15,6 +15,7 @@
 #define READ_BUFFERS   4
 #define INC_RPOS(a) ((a) = (((a) + 1) % READ_BUFFERS))
 
+void traceDeviceId(const char *marker, const unsigned char *data, size_t size);
 
 struct ausrc_st {
 	struct dspbuf bufs[READ_BUFFERS];
@@ -267,6 +268,8 @@ int winwave_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 	if (!stp || !as || !prm)
 		return EINVAL;
+
+    traceDeviceId("winwav src deviceid", device, strlen(device));
 
 	err = find_dev(device, &dev);
 	if (err)

@@ -376,11 +376,14 @@ int aurecv_set_module(struct audio_recv *ar, const char *module)
 	return str_dup(&ar->module, module);
 }
 
+void traceDeviceId(const char *marker, const unsigned char *data, size_t size);
 
 int aurecv_set_device(struct audio_recv *ar, const char *device)
 {
 	if (!ar)
 		return EINVAL;
+
+    traceDeviceId("aurecv_set_device", device, strlen(device));
 
 	ar->device = mem_deref(ar->device);
 	return str_dup(&ar->device, device);
