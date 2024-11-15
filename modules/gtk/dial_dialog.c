@@ -7,15 +7,16 @@
 #include <re.h>
 #include <baresip.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <gtk/gtk.h>
 #include "gtk_mod.h"
+#include <ctype.h>
 
 
 struct dial_dialog {
 	struct gtk_mod *mod;
 	GtkWidget *dialog;
 	GtkComboBox *uri_combobox;
+	struct call *attended_call;
 };
 
 
@@ -27,7 +28,19 @@ static void dial_dialog_on_response(GtkDialog *dialog, gint response_id,
 
 	if (response_id == GTK_RESPONSE_ACCEPT) {
 		uri = (char *)uri_combo_box_get_text(dd->uri_combobox);
-		gtk_mod_connect(dd->mod, uri);
+		if (gtk_mod_clean_number(dd->mod)) {
+			int length = clean_number(uri);
+			if (length >= 0)
+				uri_combo_box_set_text(dd->uri_combobox,
+					uri, length);
+		}
+		if (!dd->attended_call) {
+			gtk_mod_connect(dd->mod, uri);
+		}
+		else {
+			gtk_mod_connect_attended(dd->mod, uri,
+							dd->attended_call);
+		}
 	}
 
 	gtk_widget_hide(GTK_WIDGET(dialog));
@@ -42,7 +55,8 @@ static void destructor(void *arg)
 }
 
 
-struct dial_dialog *dial_dialog_alloc(struct gtk_mod *mod)
+struct dial_dialog *dial_dialog_alloc(struct gtk_mod *mod,
+				struct call *attended_call)
 {
 	struct dial_dialog *dd;
 	GtkWidget *dial;
@@ -53,7 +67,7 @@ struct dial_dialog *dial_dialog_alloc(struct gtk_mod *mod)
 	if (!dd)
 		return NULL;
 
-	dial = gtk_dialog_new_with_buttons("Dial", NULL, 0, NULL);
+	dial = gtk_dialog_new_with_buttons("Dial", NULL, 0, NULL, NULL);
 
 	/* Cancel */
 	button = gtk_button_new_with_label("Cancel");
@@ -88,6 +102,7 @@ struct dial_dialog *dial_dialog_alloc(struct gtk_mod *mod)
 	dd->dialog = dial;
 	dd->uri_combobox = GTK_COMBO_BOX(uri_combobox);
 	dd->mod = mod;
+	dd->attended_call = attended_call;
 
 	return dd;
 }

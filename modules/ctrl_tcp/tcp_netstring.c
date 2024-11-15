@@ -70,13 +70,22 @@ static bool netstring_send_handler(int *err, struct mbuf *mb, void *arg)
 	re_snprintf(num_str, sizeof(num_str), "%zu", mbuf_get_left(mb));
 	num_len = strlen(num_str);
 
-	mb->pos = NETSTRING_HEADER_SIZE - (num_len + 1);
-	mbuf_write_mem(mb, (uint8_t*) num_str, num_len);
-	mb->pos = NETSTRING_HEADER_SIZE - (num_len + 1);
-	mb->buf[mb->pos + num_len] = ':';
-	mb->buf[mb->end] = ',';
+	mbuf_set_pos(mb, NETSTRING_HEADER_SIZE - (num_len + 1));
+	*err = mbuf_write_mem(mb, (uint8_t*) num_str, num_len);
+	if (*err)
+		return true;
 
-	mb->end += 1;
+	mbuf_set_pos(mb, NETSTRING_HEADER_SIZE - (num_len + 1) + num_len);
+	*err = mbuf_write_u8(mb, ':');
+	if (*err)
+		return true;
+
+	mbuf_skip_to_end(mb);
+	*err = mbuf_write_u8(mb, ',');
+	if (*err)
+		return true;
+
+	mbuf_set_pos(mb, NETSTRING_HEADER_SIZE - (num_len + 1));
 
 	++netstring->n_tx;
 
@@ -209,14 +218,4 @@ int netstring_insert(struct netstring **netstringp, struct tcp_conn *tc,
 		*netstringp = netstring;
 
 	return err;
-}
-
-
-int netstring_debug(struct re_printf *pf, const struct netstring *netstring)
-{
-	if (!netstring)
-		return 0;
-
-	return re_hprintf(pf, "tx=%llu, rx=%llu",
-			              netstring->n_tx, netstring->n_rx);
 }

@@ -1,11 +1,12 @@
 /**
  * @file av1/decode.c AV1 Decode
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2023 Alfred E. Heggestad
  */
 
 #include <string.h>
 #include <re.h>
+#include <re_av1.h>
 #include <rem.h>
 #include <baresip.h>
 #include <aom/aom.h>
@@ -19,30 +20,13 @@ enum {
 };
 
 
-/* NOTE: re-using VP9 header format for now.. */
-struct hdr {
-	unsigned x:1;
-	unsigned noref:1;
-	unsigned start:1;
-	unsigned partid:4;
-	/* extension fields */
-	unsigned i:1;
-	unsigned l:1;
-	unsigned t:1;
-	unsigned k:1;
-	uint16_t picid;
-	uint8_t tl0picidx;
-	unsigned tid:2;
-	unsigned y:1;
-	unsigned keyidx:5;
-};
-
 struct viddec_state {
 	aom_codec_ctx_t ctx;
 	struct mbuf *mb;
 	bool ctxup;
 	bool started;
 	uint16_t seq;
+	unsigned w;
 };
 
 
@@ -58,7 +42,7 @@ static void destructor(void *arg)
 
 
 int av1_decode_update(struct viddec_state **vdsp, const struct vidcodec *vc,
-		       const char *fmtp)
+		       const char *fmtp, const struct video *vid)
 {
 	struct viddec_state *vds;
 	aom_codec_dec_cfg_t cfg = {
@@ -68,6 +52,7 @@ int av1_decode_update(struct viddec_state **vdsp, const struct vidcodec *vc,
 	int err = 0;
 	(void)vc;
 	(void)fmtp;
+	(void)vid;
 
 	if (!vdsp)
 		return EINVAL;
@@ -105,155 +90,121 @@ int av1_decode_update(struct viddec_state **vdsp, const struct vidcodec *vc,
 }
 
 
-static inline int hdr_decode(struct hdr *hdr, struct mbuf *mb)
+static int copy_obu(struct mbuf *mb_bs, const uint8_t *buf, size_t size)
 {
-	uint8_t v;
+	struct av1_obu_hdr hdr;
+	struct mbuf wrap = {
+		.buf = (uint8_t *)buf,
+		.size = size,
+		.pos = 0,
+		.end = size
+	};
+	bool has_size = true;
 
-	memset(hdr, 0, sizeof(*hdr));
-
-	if (mbuf_get_left(mb) < 1)
-		return EBADMSG;
-
-	v = mbuf_read_u8(mb);
-
-	hdr->x      = v>>7 & 0x1;
-	hdr->noref  = v>>5 & 0x1;
-	hdr->start  = v>>4 & 0x1;
-	hdr->partid = v    & 0x07;
-
-	if (hdr->x) {
-
-		if (mbuf_get_left(mb) < 1)
-			return EBADMSG;
-
-		v = mbuf_read_u8(mb);
-
-		hdr->i = v>>7 & 0x1;
-		hdr->l = v>>6 & 0x1;
-		hdr->t = v>>5 & 0x1;
-		hdr->k = v>>4 & 0x1;
+	int err = av1_obu_decode(&hdr, &wrap);
+	if (err) {
+		warning("av1: decode: could not decode OBU"
+			" [%zu bytes]: %m\n", size, err);
+		return err;
 	}
 
-	if (hdr->i) {
+	switch (hdr.type) {
 
-		if (mbuf_get_left(mb) < 1)
-			return EBADMSG;
+	case OBU_SEQUENCE_HEADER:
+	case OBU_FRAME_HEADER:
+	case OBU_METADATA:
+	case OBU_FRAME:
+	case OBU_REDUNDANT_FRAME_HEADER:
+	case OBU_TILE_GROUP:
 
-		v = mbuf_read_u8(mb);
+		err = av1_obu_encode(mb_bs, hdr.type, has_size,
+				     hdr.size, mbuf_buf(&wrap));
+		if (err)
+			return err;
+		break;
 
-		if (v>>7 & 0x1) {
+	case OBU_TEMPORAL_DELIMITER:
+	case OBU_TILE_LIST:
+	case OBU_PADDING:
+		/* MUST be ignored by receivers. */
+		warning("av1: decode: copy: unexpected obu type [%H]\n",
+			av1_obu_print, &hdr);
+		return EPROTO;
 
-			if (mbuf_get_left(mb) < 1)
-				return EBADMSG;
-
-			hdr->picid  = (v & 0x7f)<<8;
-			hdr->picid += mbuf_read_u8(mb);
-		}
-		else {
-			hdr->picid = v & 0x7f;
-		}
-	}
-
-	if (hdr->l) {
-
-		if (mbuf_get_left(mb) < 1)
-			return EBADMSG;
-
-		hdr->tl0picidx = mbuf_read_u8(mb);
-	}
-
-	if (hdr->t || hdr->k) {
-
-		if (mbuf_get_left(mb) < 1)
-			return EBADMSG;
-
-		v = mbuf_read_u8(mb);
-
-		hdr->tid    = v>>6 & 0x3;
-		hdr->y      = v>>5 & 0x1;
-		hdr->keyidx = v    & 0x1f;
+	default:
+		warning("av1: decode: copy: unknown obu type [%H]\n",
+			av1_obu_print, &hdr);
+		return EPROTO;
 	}
 
 	return 0;
 }
 
 
-static inline bool is_keyframe(struct mbuf *mb)
-{
-	aom_codec_stream_info_t si;
-	aom_codec_err_t ret;
-
-	memset(&si, 0, sizeof(si));
-
-	ret = aom_codec_peek_stream_info(&aom_codec_av1_dx_algo,
-					 mbuf_buf(mb),
-					 (unsigned int)mbuf_get_left(mb), &si);
-	if (ret != AOM_CODEC_OK)
-		return false;
-
-	return si.is_kf;
-}
-
-
-static inline int16_t seq_diff(uint16_t x, uint16_t y)
-{
-	return (int16_t)(y - x);
-}
-
-
 int av1_decode(struct viddec_state *vds, struct vidframe *frame,
-	       bool *intra, bool marker, uint16_t seq, struct mbuf *mb)
+	       struct viddec_packet *pkt)
 {
+	aom_codec_frame_flags_t flags;
 	aom_codec_iter_t iter = NULL;
 	aom_codec_err_t res;
 	aom_image_t *img;
-	struct hdr hdr;
-	int err, i;
+	struct av1_aggr_hdr hdr;
+	struct mbuf *mb2 = NULL;
+	int err;
 
-	if (!vds || !frame || !intra || !mb)
+	if (!vds || !frame || !pkt || !pkt->mb)
 		return EINVAL;
 
-	*intra = false;
+	pkt->intra = false;
+	struct mbuf *mb = pkt->mb;
 
-	err = hdr_decode(&hdr, mb);
+	err = av1_aggr_hdr_decode(&hdr, mb);
 	if (err)
 		return err;
 
-#if 1
-	debug("av1: header: x=%u noref=%u start=%u partid=%u "
-	      "i=%u l=%u t=%u k=%u "
-	      "picid=%u tl0picidx=%u tid=%u y=%u keyidx=%u\n",
-	      hdr.x, hdr.noref, hdr.start, hdr.partid,
-	      hdr.i, hdr.l, hdr.t, hdr.k,
-	      hdr.picid, hdr.tl0picidx, hdr.tid, hdr.y, hdr.keyidx);
+#if 0
+	debug("av1: decode: header:  [%s]  [seq=%u, %4zu bytes]"
+	      "  z=%u  y=%u  w=%u  n=%u\n",
+	      marker ? "M" : " ",
+	      seq, mbuf_get_left(mb),
+	      hdr.z, hdr.y, hdr.w, hdr.n);
 #endif
 
-	if (hdr.start && hdr.partid == 0) {
+	if (hdr.n) {
+		info("av1: new coded video sequence\n");
 
-		if (is_keyframe(mb))
-			*intra = true;
-
-		mbuf_rewind(vds->mb);
-		vds->started = true;
+		/* Note: if N equals 1 then Z must equal 0. */
+		if (hdr.z) {
+			warning("av1: Note: if N equals 1 then"
+				" Z must equal 0.\n");
+		}
 	}
-	else {
+
+	if (hdr.z) {
 		if (!vds->started)
 			return 0;
 
-		if (seq_diff(vds->seq, seq) != 1) {
+		if (rtp_seq_diff(vds->seq, pkt->hdr->seq) != 1) {
 			mbuf_rewind(vds->mb);
 			vds->started = false;
 			return 0;
 		}
 	}
+	else {
+		/* save the W obu count */
+		vds->w = hdr.w;
 
-	vds->seq = seq;
+		mbuf_rewind(vds->mb);
+		vds->started = true;
+	}
+
+	vds->seq = pkt->hdr->seq;
 
 	err = mbuf_write_mem(vds->mb, mbuf_buf(mb), mbuf_get_left(mb));
 	if (err)
 		goto out;
 
-	if (!marker) {
+	if (!pkt->hdr->m) {
 
 		if (vds->mb->end > DECODE_MAXSZ) {
 			warning("av1: decode buffer size exceeded\n");
@@ -264,10 +215,77 @@ int av1_decode(struct viddec_state *vds, struct vidframe *frame,
 		return 0;
 	}
 
-	res = aom_codec_decode(&vds->ctx, vds->mb->buf,
-			       (unsigned int)vds->mb->end, NULL);
+	vds->mb->pos = 0;
+
+	mb2 = mbuf_alloc(vds->mb->end);
+	if (!mb2) {
+		err = ENOMEM;
+		goto out;
+	}
+
+	/* prepend Temporal Delimiter */
+	err = av1_obu_encode(mb2, OBU_TEMPORAL_DELIMITER, true, 0, NULL);
+	if (err)
+		goto out;
+
+	if (vds->w) {
+		size_t size;
+
+		for (unsigned i=0; i<(vds->w-1); i++) {
+
+			uint64_t val;
+
+			err = av1_leb128_decode(vds->mb, &val);
+			if (err)
+				goto out;
+
+			size = (size_t)val;
+
+			err = copy_obu(mb2, mbuf_buf(vds->mb), size);
+			if (err)
+				goto out;
+
+			mbuf_advance(vds->mb, size);
+		}
+
+		/* last OBU element MUST NOT be preceded by a length field */
+		size = mbuf_get_left(vds->mb);
+
+		err = copy_obu(mb2, mbuf_buf(vds->mb), size);
+		if (err)
+			goto out;
+
+		mbuf_advance(vds->mb, size);
+	}
+	else {
+		while (mbuf_get_left(vds->mb) >= 2) {
+
+			uint64_t val;
+			size_t size;
+
+			/* each OBU element MUST be preceded by length field */
+			err = av1_leb128_decode(vds->mb, &val);
+			if (err)
+				goto out;
+
+			size = (size_t)val;
+
+			err = copy_obu(mb2, mbuf_buf(vds->mb), size);
+			if (err)
+				goto out;
+
+			mbuf_advance(vds->mb, size);
+		}
+	}
+
+	res = aom_codec_decode(&vds->ctx, mb2->buf,
+			       (unsigned int)mb2->end, NULL);
 	if (res) {
-		debug("av1: decode error: %s\n", aom_codec_err_to_string(res));
+		warning("av1: decode error [w=%u, %zu bytes]: %s (%s)\n",
+			hdr.w,
+			mb2->end,
+			aom_codec_err_to_string(res),
+			aom_codec_error_detail(&vds->ctx));
 		err = EPROTO;
 		goto out;
 	}
@@ -278,12 +296,18 @@ int av1_decode(struct viddec_state *vds, struct vidframe *frame,
 		goto out;
 	}
 
+	res = aom_codec_control(&vds->ctx, AOMD_GET_FRAME_FLAGS, &flags);
+	if (res == AOM_CODEC_OK) {
+		if (flags & AOM_FRAME_IS_KEY)
+			pkt->intra = true;
+	}
+
 	if (img->fmt != AOM_IMG_FMT_I420) {
 		warning("av1: bad pixel format (%i)\n", img->fmt);
 		goto out;
 	}
 
-	for (i=0; i<4; i++) {
+	for (unsigned i=0; i<3; i++) {
 		frame->data[i]     = img->planes[i];
 		frame->linesize[i] = img->stride[i];
 	}
@@ -295,6 +319,8 @@ int av1_decode(struct viddec_state *vds, struct vidframe *frame,
  out:
 	mbuf_rewind(vds->mb);
 	vds->started = false;
+
+	mem_deref(mb2);
 
 	return err;
 }

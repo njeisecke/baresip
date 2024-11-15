@@ -1,7 +1,7 @@
 /**
  * @file session.h  GNU ZRTP: Session class
  *
- * Copyright (C) 2010 - 2017 Creytiv.com
+ * Copyright (C) 2010 - 2017 Alfred E. Heggestad
  */
 #ifndef __SESSION_H
 #define __SESSION_H
@@ -34,6 +34,10 @@ public:
 	static int cmd_verify_sas(struct re_printf *pf, void *arg);
 	static int cmd_unverify_sas(struct re_printf *pf, void *arg);
 	static int cmd_sas(bool verify, struct re_printf *pf, void *arg);
+
+	menc_event_h *eventh;
+	menc_error_h *errorh;
+	void *arg;
 
 private:
 	static std::vector<Session *> s_sessl;

@@ -1,7 +1,7 @@
 /**
  * @file ebuacip.c  EBU ACIP (Audio Contribution over IP) Profile
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -36,8 +36,6 @@ static int set_ebuacip_params(struct audio *au)
 	struct le *le;
 	int jb_id = 0;
 	int err = 0;
-
-	info(".... ebuacip: adding SDP parameters\n");
 
 	/* set ebuacip version fixed value 0 for now. */
 	err |= sdp_media_set_lattr(sdp, false, "ebuacip", "version %i", 0);
@@ -99,34 +97,28 @@ static bool ebuacip_handler(const char *name, const char *value, void *arg)
 	struct audio *au = arg;
 	struct config_audio *cfg = audio_config(au);
 	struct sdp_media *sdp;
-	struct pl type, val, val2;
+	struct pl val, val_min, val_max;
 	(void)name;
-
-	info(".... ebuacip: param '%s'\n", value);
 
 	/* check type first, if not fixed or auto, return false */
 
 	if (0 == re_regex(value, str_len(value),
-			  "jbdef [0-9]+ [a-z]+ [0-9]+-[0-9]+",
-			  NULL, &type, &val, &val2)) {
+			  "jbdef [0-9]+ auto [0-9]+-[0-9]+",
+			  NULL, &val_min, &val_max)) {
 
-		/* check for type auto */
-		if (0 == pl_strcasecmp(&type, "auto")) {
-			/* set audio buffer from min and max value*/
-			cfg->buffer.min = pl_u32(&val);
-			cfg->buffer.max = pl_u32(&val2);
-		}
+		/* set audio buffer from min and max value*/
+		cfg->buffer.min = pl_u32(&val_min);
+		cfg->buffer.max = pl_u32(&val_max);
 	}
 	else if (0 == re_regex(value, str_len(value),
-			       "jbdef [0-9]+ [a-z]+ [0-9]+",
-			       NULL, &type, &val)) {
+			       "jbdef [0-9]+ fixed [0-9]+",
+			       NULL, &val)) {
 
-		/* check type fixed */
-		if (0 == pl_strcasecmp(&type, "fixed")) {
-			/* set both audio buffer min and max value to val*/
-			cfg->buffer.min = pl_u32(&val);
-			cfg->buffer.max = pl_u32(&val);
-		}
+		uint32_t v = pl_u32(&val);
+
+		/* set both audio buffer min and max value to val*/
+		cfg->buffer.min = v;
+		cfg->buffer.max = v;
 	}
 	else {
 		return false;
@@ -139,28 +131,28 @@ static bool ebuacip_handler(const char *name, const char *value, void *arg)
 }
 
 
-static void ua_event_handler(struct ua *ua, enum ua_event ev,
-			     struct call *call, const char *prm, void *arg)
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
 	struct audio *au;
-	(void)prm;
+	struct ua   *ua   = bevent_get_ua(event);
+	struct call *call = bevent_get_call(event);
+	const char  *txt  = bevent_get_text(event);
 	(void)arg;
 
 #if 1
 	debug(".... ebuacip: [ ua=%s call=%s ] event: %s (%s)\n",
-	      ua_aor(ua), call_id(call), uag_event_str(ev), prm);
+	      account_aor(ua_account(ua)), call_id(call),
+	      uag_event_str(ev), txt);
 #endif
 
 	switch (ev) {
 
 	case UA_EVENT_CALL_LOCAL_SDP:
-		info(".... ebuacip: CALL_CONNECT event\n");
-		if (0 == str_casecmp(prm, "offer"))
+		if (0 == str_casecmp(txt, "offer"))
 			set_ebuacip_params(call_audio(call));
 		break;
 
 	case UA_EVENT_CALL_REMOTE_SDP:
-		info(".... ebuacip: SDP_OFFER event\n");
 		au = call_audio(call);
 		sdp_media_rattr_apply(stream_sdpmedia(audio_strm(au)),
 				      "ebuacip", ebuacip_handler, au);
@@ -176,13 +168,13 @@ static int module_init(void)
 {
 	conf_get_str(conf_cur(), "ebuacip_jb_type", jb_type, sizeof(jb_type));
 
-	return uag_event_register(ua_event_handler, NULL);
+	return bevent_register(event_handler, NULL);
 }
 
 
 static int module_close(void)
 {
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 
 	return 0;
 }

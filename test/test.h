@@ -1,7 +1,7 @@
 /**
  * @file test.h  Selftest for Baresip core -- internal API
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 
@@ -15,10 +15,11 @@
 
 #define ASSERT_EQ(expected, actual)				\
 	if ((expected) != (actual)) {				\
-		warning("selftest: ASSERT_EQ: %s:%u:"		\
-			" expected=%d, actual=%d\n",		\
-			__FILE__, __LINE__,			\
-			(int)(expected), (int)(actual));	\
+		warning("selftest: ASSERT_EQ: %s:%u: %s():"	\
+			" expected=%d(0x%x), actual=%d(0x%x)\n",\
+			__FILE__, __LINE__, __func__,		\
+			(expected), (expected),			\
+			(actual), (actual));			\
 		err = EINVAL;					\
 		goto out;					\
 	}
@@ -43,6 +44,16 @@
 		goto out;						\
 	}
 
+#define ASSERT_PLEQ(expected, actual)					\
+	if (0 != pl_cmp((expected), (actual))) {			\
+		warning("selftest: ASSERT_PLEQ: %s:%u:"			\
+			" expected = '%r', actual = '%r'\n",		\
+			__FILE__, __LINE__,				\
+			(expected), (actual));				\
+		err = EBADMSG;						\
+		goto out;						\
+	}
+
 #define TEST_ERR(err)							\
 	if ((err)) {							\
 		(void)re_fprintf(stderr, "\n");				\
@@ -50,6 +61,16 @@
 			      " (%m)\n",				\
 			      __FILE__, __LINE__,			\
 			      (err));					\
+		goto out;						\
+	}
+
+#define TEST_ERR_TXT(err,txt)						\
+	if ((err)) {							\
+		(void)re_fprintf(stderr, "\n");				\
+		warning("TEST_ERR: %s:%u: %s"				\
+			      " (%m)\n",				\
+			      __FILE__, __LINE__,			\
+			      (txt), (err));				\
 		goto out;						\
 	}
 
@@ -103,6 +124,10 @@ extern const char test_certificate[];
 #endif
 
 
+void test_set_datapath(const char *path);
+const char *test_datapath(void);
+
+
 /*
  * Mock DNS-Server
  */
@@ -117,24 +142,11 @@ struct dns_server {
 int dns_server_alloc(struct dns_server **srvp, bool rotate);
 int dns_server_add_a(struct dns_server *srv,
 		     const char *name, uint32_t addr);
+int dns_server_add_aaaa(struct dns_server *srv, const char *name,
+			const uint8_t *addr);
 int dns_server_add_srv(struct dns_server *srv, const char *name,
 		       uint16_t pri, uint16_t weight, uint16_t port,
 		       const char *target);
-
-/*
- * Mock Audio-codec
- */
-
-void mock_aucodec_register(struct list *aucodecl);
-void mock_aucodec_unregister(void);
-
-/*
- * Mock Audio-source
- */
-
-struct ausrc;
-
-int mock_ausrc_register(struct ausrc **ausrcp, struct list *ausrcl);
 
 
 /*
@@ -143,27 +155,12 @@ int mock_ausrc_register(struct ausrc **ausrcp, struct list *ausrcl);
 
 struct auplay;
 
-typedef void (mock_sample_h)(const void *sampv, size_t sampc, void *arg);
+typedef void (mock_sample_h)(struct auframe *af, const char *dev, void *arg);
 
+void mock_aucodec_register(void);
+void mock_aucodec_unregister(void);
 int mock_auplay_register(struct auplay **auplayp, struct list *auplayl,
 			 mock_sample_h *sampleh, void *arg);
-
-
-/*
- * Mock Audio-filter
- */
-
-
-void mock_aufilt_register(struct list *aufiltl);
-void mock_aufilt_unregister(void);
-
-
-/*
- * Mock Media encryption
- */
-
-void mock_menc_register(void);
-void mock_menc_unregister(void);
 
 
 /*
@@ -172,15 +169,6 @@ void mock_menc_unregister(void);
 
 void mock_mnat_register(struct list *mnatl);
 void mock_mnat_unregister(void);
-
-
-/*
- * Mock Video-source
- */
-
-struct vidsrc;
-
-int mock_vidsrc_register(struct vidsrc **vidsrcp);
 
 
 /*
@@ -199,7 +187,7 @@ struct vidisp;
 struct vidframe;
 
 typedef void (mock_vidisp_h)(const struct vidframe *frame, uint64_t timestamp,
-			     void *arg);
+			     const char *title, void *arg);
 
 int mock_vidisp_register(struct vidisp **vidispp,
 			 mock_vidisp_h *disph, void *arg);
@@ -208,12 +196,11 @@ int mock_vidisp_register(struct vidisp **vidispp,
 /* test cases */
 
 int test_account(void);
+int test_account_uri_complete(void);
 int test_aulevel(void);
-int test_call_af_mismatch(void);
 int test_call_answer(void);
 int test_call_answer_hangup_a(void);
 int test_call_answer_hangup_b(void);
-int test_call_aufilt(void);
 int test_call_aulevel(void);
 int test_call_custom_headers(void);
 int test_call_dtmf(void);
@@ -224,24 +211,47 @@ int test_call_medianat(void);
 int test_call_multiple(void);
 int test_call_progress(void);
 int test_call_reject(void);
+int test_call_cancel(void);
 int test_call_rtcp(void);
 int test_call_rtp_timeout(void);
 int test_call_tcp(void);
+int test_call_deny_udp(void);
 int test_call_transfer(void);
+int test_call_transfer_fail(void);
+int test_call_attended_transfer(void);
 int test_call_video(void);
+int test_call_change_videodir(void);
 int test_call_webrtc(void);
+int test_call_bundle(void);
+int test_call_ipv6ll(void);
+int test_call_100rel_audio(void);
+int test_call_100rel_video(void);
+int test_call_hold_resume(void);
+int test_call_srtp_tx_rekey(void);
+#ifdef USE_TLS
+int test_call_sni(void);
+int test_call_cert_select(void);
+#endif
 int test_cmd(void);
 int test_cmd_long(void);
 int test_contact(void);
-int test_event(void);
+int test_bevent_encode(void);
+int test_bevent_register(void);
+int test_jbuf(void);
+int test_jbuf_adaptive(void);
+int test_jbuf_adaptive_video(void);
 int test_message(void);
 int test_network(void);
 int test_play(void);
+int test_stunuri(void);
 int test_ua_alloc(void);
 int test_ua_options(void);
+int test_ua_refer(void);
 int test_ua_register(void);
 int test_ua_register_auth(void);
 int test_ua_register_auth_dns(void);
 int test_ua_register_dns(void);
 int test_uag_find_param(void);
 int test_video(void);
+int test_clean_number(void);
+int test_clean_number_only_numeric(void);

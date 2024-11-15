@@ -1,18 +1,22 @@
 /**
  * @file dshow.cpp Windows DirectShow video-source
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  * Copyright (C) 2010 Dusan Stevanovic
  */
 
 #include <stdio.h>
 #include <re.h>
-#include <rem.h>
+extern "C" {
+  #include <rem_video.h>
+}
 #include <baresip.h>
 #include <commctrl.h>
 #include <dshow.h>
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "strmiids.lib")
+#endif
 
 
 /**
@@ -97,8 +101,6 @@ DEFINE_GUID(CLSID_SampleGrabber, 0xc1f400a0, 0x3f08, 0x11d3,
 class Grabber;
 
 struct vidsrc_st {
-	const struct vidsrc *vs;  /* inheritance */
-
 	ICaptureGraphBuilder2 *capture;
 	IBaseFilter *grabber_filter;
 	IBaseFilter *dev_filter;
@@ -118,6 +120,7 @@ struct vidsrc_st {
 class Grabber : public ISampleGrabberCB {
 public:
 	Grabber(struct vidsrc_st *st) : src(st) { }
+	virtual ~Grabber() { }
 
 	STDMETHOD(QueryInterface)(REFIID InterfaceIdentifier,
 				  VOID** ppvObject) throw()
@@ -147,6 +150,13 @@ public:
 		uint32_t *buf_RGB32;
 		struct vidframe vidframe;
 		uint64_t timestamp = (uint64_t)(sample_time * VIDEO_TIMEBASE);
+		if (buf_len != buf_len_RGB32 * 4) {
+			warning("dshow: BufferCB got %uB, "
+				"required %uB (%ux%u)\n",
+				buf_len, buf_len_RGB32 * 4,
+				src->size.w, src->size.h);
+			return S_OK;
+		}
 
 		vidframe_init_buf(&vidframe, VID_FMT_RGB32, &src->size, buf);
 
@@ -168,6 +178,8 @@ public:
 
 	STDMETHOD(SampleCB) (double sample_time, IMediaSample *samp)
 	{
+		(void)sample_time;
+		(void)samp;
 		return S_OK;
 	}
 
@@ -339,14 +351,14 @@ static AM_MEDIA_TYPE *free_mt(AM_MEDIA_TYPE *mt)
 
 static int config_pin(struct vidsrc_st *st, IPin *pin)
 {
-	AM_MEDIA_TYPE *mt;
+	AM_MEDIA_TYPE *mt = NULL;
 	AM_MEDIA_TYPE *best_mt = NULL;
 	IEnumMediaTypes *media_enum = NULL;
 	IAMStreamConfig *stream_conf = NULL;
 	VIDEOINFOHEADER *vih;
 	HRESULT hr;
-	int h = st->size.h;
-	int w = st->size.w;
+	int h;
+	int w;
 	int rh, rw;
 	int wh, rwrh;
 	int best_match = 0;
@@ -358,10 +370,13 @@ static int config_pin(struct vidsrc_st *st, IPin *pin)
 	hr = pin->EnumMediaTypes(&media_enum);
 	if (FAILED(hr))
 		return ENODATA;
-
+	h = st->size.h;
+	w = st->size.w;
 	while ((hr = media_enum->Next(1, &mt, NULL)) == S_OK) {
-		if (mt->formattype != FORMAT_VideoInfo)
+		if (mt->formattype != FORMAT_VideoInfo) {
+			mt = free_mt(mt);
 			continue;
+		}
 
 		vih = (VIDEOINFOHEADER *) mt->pbFormat;
 		rw = vih->bmiHeader.biWidth;
@@ -382,6 +397,7 @@ static int config_pin(struct vidsrc_st *st, IPin *pin)
 				best_match = diff;
 				free_mt(best_mt);
 				best_mt = mt;
+				mt = NULL;
 			}
 		}
 	}
@@ -476,10 +492,11 @@ static void destructor(void *arg)
 
 
 static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
-		 struct media_ctx **ctx, struct vidsrc_prm *prm,
+		 struct vidsrc_prm *prm,
 		 const struct vidsz *size,
 		 const char *fmt, const char *dev,
 		 vidsrc_frame_h *frameh,
+		 vidsrc_packet_h  *packeth,
 		 vidsrc_error_h *errorh, void *arg)
 {
 	struct vidsrc_st *st;
@@ -487,7 +504,8 @@ static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 	IPin *pin = NULL;
 	HRESULT hr;
 	int err;
-	(void)ctx;
+	(void)fmt;
+	(void)packeth;
 	(void)errorh;
 
 	if (!stp || !vs || !prm || !size)
@@ -500,8 +518,6 @@ static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 	err = get_device(st, dev);
 	if (err)
 		goto out;
-
-	st->vs = vs;
 
 	st->size   = *size;
 	st->frameh = frameh;

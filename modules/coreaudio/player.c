@@ -1,10 +1,9 @@
 /**
  * @file coreaudio/player.c  Apple Coreaudio sound driver - player
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <AudioToolbox/AudioQueue.h>
-#include <pthread.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -16,11 +15,11 @@
 
 
 struct auplay_st {
-	const struct auplay *ap;      /* inheritance */
 	AudioQueueRef queue;
 	AudioQueueBufferRef buf[BUFC];
-	pthread_mutex_t mutex;
+	mtx_t mutex;
 	uint32_t sampsz;
+	struct auplay_prm prm;
 	auplay_write_h *wh;
 	void *arg;
 };
@@ -31,22 +30,22 @@ static void auplay_destructor(void *arg)
 	struct auplay_st *st = arg;
 	uint32_t i;
 
-	pthread_mutex_lock(&st->mutex);
+	mtx_lock(&st->mutex);
 	st->wh = NULL;
-	pthread_mutex_unlock(&st->mutex);
+	mtx_unlock(&st->mutex);
 
 	if (st->queue) {
 		AudioQueuePause(st->queue);
 		AudioQueueStop(st->queue, true);
 
-		for (i=0; i<ARRAY_SIZE(st->buf); i++)
+		for (i=0; i<RE_ARRAY_SIZE(st->buf); i++)
 			if (st->buf[i])
 				AudioQueueFreeBuffer(st->queue, st->buf[i]);
 
 		AudioQueueDispose(st->queue, true);
 	}
 
-	pthread_mutex_destroy(&st->mutex);
+	mtx_destroy(&st->mutex);
 }
 
 
@@ -54,18 +53,23 @@ static void play_handler(void *userData, AudioQueueRef outQ,
 			 AudioQueueBufferRef outQB)
 {
 	struct auplay_st *st = userData;
+	struct auframe af;
 	auplay_write_h *wh;
 	void *arg;
 
-	pthread_mutex_lock(&st->mutex);
+	mtx_lock(&st->mutex);
 	wh  = st->wh;
 	arg = st->arg;
-	pthread_mutex_unlock(&st->mutex);
+	mtx_unlock(&st->mutex);
 
 	if (!wh)
 		return;
 
-	wh(outQB->mAudioData, outQB->mAudioDataByteSize/st->sampsz, arg);
+	auframe_init(&af, st->prm.fmt, outQB->mAudioData,
+		     outQB->mAudioDataByteSize / st->sampsz, st->prm.srate,
+		     st->prm.ch);
+
+	wh(&af, arg);
 
 	AudioQueueEnqueueBuffer(outQ, outQB, 0, NULL);
 }
@@ -88,7 +92,6 @@ int coreaudio_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
 
@@ -98,9 +101,13 @@ int coreaudio_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 		goto out;
 	}
 
-	err = pthread_mutex_init(&st->mutex, NULL);
-	if (err)
+	st->prm = *prm;
+
+	err = mtx_init(&st->mutex, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
 		goto out;
+	}
 
 	fmt.mSampleRate       = (Float64)prm->srate;
 	fmt.mFormatID         = kAudioFormatLinearPCM;
@@ -156,7 +163,7 @@ int coreaudio_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 	sampc = prm->srate * prm->ch * prm->ptime / 1000;
 	bytc  = sampc * st->sampsz;
 
-	for (i=0; i<ARRAY_SIZE(st->buf); i++)  {
+	for (i=0; i<RE_ARRAY_SIZE(st->buf); i++)  {
 
 		status = AudioQueueAllocateBuffer(st->queue, bytc,
 						  &st->buf[i]);

@@ -1,11 +1,10 @@
 /**
  * @file coreaudio/recorder.c  Apple Coreaudio sound driver - recorder
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <AudioToolbox/AudioQueue.h>
 #include <unistd.h>
-#include <pthread.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -16,11 +15,12 @@
 
 
 struct ausrc_st {
-	const struct ausrc *as;      /* inheritance */
 	AudioQueueRef queue;
 	AudioQueueBufferRef buf[BUFC];
-	pthread_mutex_t mutex;
+	mtx_t mutex;
+	struct ausrc_prm prm;
 	uint32_t sampsz;
+	int fmt;
 	ausrc_read_h *rh;
 	void *arg;
 };
@@ -31,22 +31,22 @@ static void ausrc_destructor(void *arg)
 	struct ausrc_st *st = arg;
 	uint32_t i;
 
-	pthread_mutex_lock(&st->mutex);
+	mtx_lock(&st->mutex);
 	st->rh = NULL;
-	pthread_mutex_unlock(&st->mutex);
+	mtx_unlock(&st->mutex);
 
 	if (st->queue) {
 		AudioQueuePause(st->queue);
 		AudioQueueStop(st->queue, true);
 
-		for (i=0; i<ARRAY_SIZE(st->buf); i++)
+		for (i=0; i<RE_ARRAY_SIZE(st->buf); i++)
 			if (st->buf[i])
 				AudioQueueFreeBuffer(st->queue, st->buf[i]);
 
 		AudioQueueDispose(st->queue, true);
 	}
 
-	pthread_mutex_destroy(&st->mutex);
+	mtx_destroy(&st->mutex);
 }
 
 
@@ -57,28 +57,34 @@ static void record_handler(void *userData, AudioQueueRef inQ,
 			   const AudioStreamPacketDescription *inPacketDesc)
 {
 	struct ausrc_st *st = userData;
+	struct auframe af;
 	ausrc_read_h *rh;
 	void *arg;
 	(void)inStartTime;
 	(void)inNumPackets;
 	(void)inPacketDesc;
 
-	pthread_mutex_lock(&st->mutex);
+	mtx_lock(&st->mutex);
 	rh  = st->rh;
 	arg = st->arg;
-	pthread_mutex_unlock(&st->mutex);
+	mtx_unlock(&st->mutex);
 
 	if (!rh)
 		return;
 
-	rh(inQB->mAudioData, inQB->mAudioDataByteSize/st->sampsz, arg);
+	auframe_init(&af, st->prm.fmt, inQB->mAudioData,
+		     inQB->mAudioDataByteSize / st->sampsz, st->prm.srate,
+		     st->prm.ch);
+
+	af.timestamp = AUDIO_TIMEBASE*inStartTime->mSampleTime / st->prm.srate;
+
+	rh(&af, arg);
 
 	AudioQueueEnqueueBuffer(inQ, inQB, 0, NULL);
 }
 
 
 int coreaudio_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
-			     struct media_ctx **ctx,
 			     struct ausrc_prm *prm, const char *device,
 			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
@@ -88,7 +94,6 @@ int coreaudio_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	OSStatus status;
 	int err;
 
-	(void)ctx;
 	(void)errh;
 
 	if (!stp || !as || !prm)
@@ -98,7 +103,6 @@ int coreaudio_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (!st)
 		return ENOMEM;
 
-	st->as  = as;
 	st->rh  = rh;
 	st->arg = arg;
 
@@ -110,10 +114,14 @@ int coreaudio_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 
 	sampc = prm->srate * prm->ch * prm->ptime / 1000;
 	bytc  = sampc * st->sampsz;
+	st->fmt = prm->fmt;
+	st->prm = *prm;
 
-	err = pthread_mutex_init(&st->mutex, NULL);
-	if (err)
+	err = mtx_init(&st->mutex, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
 		goto out;
+	}
 
 	fmt.mSampleRate       = (Float64)prm->srate;
 	fmt.mFormatID         = kAudioFormatLinearPCM;
@@ -167,7 +175,7 @@ int coreaudio_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		}
 	}
 
-	for (i=0; i<ARRAY_SIZE(st->buf); i++)  {
+	for (i=0; i<RE_ARRAY_SIZE(st->buf); i++)  {
 
 		status = AudioQueueAllocateBuffer(st->queue, bytc,
 						  &st->buf[i]);

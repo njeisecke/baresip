@@ -1,0 +1,132 @@
+name: Build
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+    - stable
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        compiler: [gcc, clang, gcc-14]
+        os: [ubuntu-22.04, ubuntu-24.04, macos-latest]
+        exclude:
+          - os: macos-latest
+            compiler: gcc
+          - os: macos-latest
+            compiler: gcc-14
+          - os: ubuntu-22.04
+            compiler: gcc-14
+    env:
+      CC: ${{ matrix.compiler }}
+      MACOSX_DEPLOYMENT_TARGET: "10.12"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: openssl path macos
+      if: ${{ runner.os == 'macOS' }}
+      run: |
+        echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl)" >> $GITHUB_ENV
+
+    - name: fix flaky azure mirrors
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        sudo sed -i 's/azure\./de\./' /etc/apt/sources.list
+
+    - name: Fix Ubuntu 22.04
+      if: ${{ matrix.os == 'ubuntu-22.04' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get remove libunwind-14 -y
+        sudo apt-get install libunwind-dev libaom-dev libsdl2-dev -y
+
+    - name: install packages
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        sudo apt-get update && sudo apt-get install -y \
+                            libasound2-dev \
+                            libavcodec-dev \
+                            libavdevice-dev \
+                            libavformat-dev \
+                            libcodec2-dev \
+                            libfdk-aac-dev \
+                            libglib2.0-dev \
+                            libgstreamer1.0-dev \
+                            libgtk-3-dev \
+                            libjack-jackd2-dev \
+                            libmosquitto-dev \
+                            libmpg123-dev \
+                            libopencore-amrnb-dev \
+                            libopencore-amrwb-dev \
+                            libopus-dev \
+                            libpulse-dev \
+                            libsndfile1-dev \
+                            libspandsp-dev \
+                            libssl-dev \
+                            libvpx-dev \
+                            libx11-dev \
+                            libwebrtc-audio-processing-dev
+
+    - name: install aac
+      if: ${{ matrix.os == 'ubuntu-20.04' }}
+      run: |
+        sudo apt-get update && sudo apt-get install -y libfdk-aac-dev
+
+    - name: install pipewire
+      if: ${{ matrix.os == 'ubuntu-22.04' }}
+      run: |
+        sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev
+
+    - name: install packages
+      if: ${{ runner.os == 'macOS' }}
+      run: |
+        brew install codec2 \
+                        aom \
+                        fdk-aac \
+                        ffmpeg \
+                        jack \
+                        mpg123 \
+                        spandsp \
+                        sdl2 \
+                        glib-utils \
+                        pkg-config
+
+    - uses: sreimers/pr-dependency-action@v1
+      with:
+        name: re
+        repo: https://github.com/baresip/re
+        secret: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: make re
+      run: |
+        cmake -S re -B re/build
+        cmake --build re/build -j
+        mv re ../.
+
+    - name: ldconfig
+      if: ${{ runner.os == 'Linux' }}
+      run: sudo ldconfig
+
+    - name: make baresip linux
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        cmake -B build -DCMAKE_C_FLAGS="-Werror" && cmake --build build -j
+
+    - name: make baresip macOS
+      if: ${{ runner.os == 'macOS' }}
+      run: |
+        cmake -B build -DCMAKE_C_FLAGS="-Werror" && cmake --build build -j
+
+    - name: baresip static
+      if: ${{ matrix.os == 'ubuntu-22.04' }}
+      run: |
+        rm -Rf build
+        cmake -B build -DSTATIC=1 -DCMAKE_C_FLAGS="-Werror" && cmake --build build -j

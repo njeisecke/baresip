@@ -1,7 +1,7 @@
 /**
  * @file baresip.h  Public Interface to Baresip
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #ifndef BARESIP_H__
@@ -13,13 +13,18 @@ extern "C" {
 
 
 /** Defines the Baresip version string */
-#define BARESIP_VERSION "0.6.5"
+#define BARESIP_VERSION "3.17.1"
 
 
 #ifndef NET_MAX_NS
 #define NET_MAX_NS (4)
 #endif
 
+
+/*
+ * Clock-rate for audio timestamp
+ */
+#define AUDIO_TIMEBASE 1000000U
 
 /*
  * Clock-rate for video timestamp
@@ -34,6 +39,7 @@ struct sdp_session;
 struct sip_msg;
 struct stream;
 struct ua;
+struct auframe;
 struct vidframe;
 struct vidrect;
 struct vidsz;
@@ -47,36 +53,84 @@ struct vidsz;
 enum answermode {
 	ANSWERMODE_MANUAL = 0,
 	ANSWERMODE_EARLY,
-	ANSWERMODE_AUTO
+	ANSWERMODE_AUTO,
+	ANSWERMODE_EARLY_AUDIO,
+	ANSWERMODE_EARLY_VIDEO,
+};
+
+/** Defines the DTMF send type */
+enum dtmfmode {
+	DTMFMODE_RTP_EVENT = 0,
+	DTMFMODE_SIP_INFO,
+	DTMFMODE_AUTO
+};
+
+/** SIP auto answer beep modes */
+enum sipansbeep {
+	SIPANSBEEP_OFF,
+	SIPANSBEEP_ON,
+	SIPANSBEEP_LOCAL,
+};
+
+/** Jitter buffer type */
+enum jbuf_type {
+	JBUF_OFF,
+	JBUF_FIXED,
+	JBUF_ADAPTIVE
+};
+
+/** Defines the incoming out-of-dialog request mode */
+enum inreq_mode {
+	INREQ_MODE_OFF = 0,
+	INREQ_MODE_ON,
 };
 
 struct account;
 
 int account_alloc(struct account **accp, const char *sipaddr);
 int account_debug(struct re_printf *pf, const struct account *acc);
+int account_json_api(struct odict *odacc, struct odict *odcfg,
+		 const struct account *acc);
 int account_set_auth_user(struct account *acc, const char *user);
 int account_set_auth_pass(struct account *acc, const char *pass);
 int account_set_outbound(struct account *acc, const char *ob, unsigned ix);
 int account_set_sipnat(struct account *acc, const char *sipnat);
 int account_set_answermode(struct account *acc, enum answermode mode);
+int account_set_rel100_mode(struct account *acc, enum rel100_mode mode);
+int account_set_dtmfmode(struct account *acc, enum dtmfmode mode);
+int account_set_inreq_mode(struct account *acc, enum inreq_mode mode);
 int account_set_display_name(struct account *acc, const char *dname);
 int account_set_regint(struct account *acc, uint32_t regint);
+int account_set_stun_uri(struct account *acc, const char *uri);
 int account_set_stun_host(struct account *acc, const char *host);
 int account_set_stun_port(struct account *acc, uint16_t port);
+int account_set_stun_user(struct account *acc, const char *user);
+int account_set_stun_pass(struct account *acc, const char *pass);
+int account_set_ausrc_dev(struct account *acc, const char *dev);
+int account_set_auplay_dev(struct account *acc, const char *dev);
 int account_set_mediaenc(struct account *acc, const char *mediaenc);
 int account_set_medianat(struct account *acc, const char *medianat);
 int account_set_audio_codecs(struct account *acc, const char *codecs);
-int account_set_mwi(struct account *acc, const char *value);
-int account_set_call_transfer(struct account *acc, const char *value);
+int account_set_video_codecs(struct account *acc, const char *codecs);
+int account_set_mwi(struct account *acc, bool value);
+int account_set_call_transfer(struct account *acc, bool value);
+int account_set_rtcp_mux(struct account *acc, bool value);
+void account_set_catchall(struct account *acc, bool value);
 int account_auth(const struct account *acc, char **username, char **password,
 		 const char *realm);
 struct list *account_aucodecl(const struct account *acc);
 struct list *account_vidcodecl(const struct account *acc);
 struct sip_addr *account_laddr(const struct account *acc);
+struct uri *account_luri(const struct account *acc);
 uint32_t account_regint(const struct account *acc);
+uint32_t account_fbregint(const struct account *acc);
 uint32_t account_pubint(const struct account *acc);
 uint32_t account_ptime(const struct account *acc);
+uint32_t account_prio(const struct account *acc);
 enum answermode account_answermode(const struct account *acc);
+enum rel100_mode account_rel100_mode(const struct account *acc);
+enum dtmfmode account_dtmfmode(const struct account *acc);
+enum inreq_mode account_inreq_mode(const struct account *acc);
 const char *account_display_name(const struct account *acc);
 const char *account_aor(const struct account *acc);
 const char *account_auth_user(const struct account *acc);
@@ -86,25 +140,31 @@ const char *account_sipnat(const struct account *acc);
 const char *account_stun_user(const struct account *acc);
 const char *account_stun_pass(const struct account *acc);
 const char *account_stun_host(const struct account *acc);
+const struct stun_uri *account_stun_uri(const struct account *acc);
 uint16_t account_stun_port(const struct account *acc);
 const char *account_mediaenc(const struct account *acc);
 const char *account_medianat(const struct account *acc);
-const char *account_mwi(const struct account *acc);
-const char *account_call_transfer(const struct account *acc);
+bool account_mwi(const struct account *acc);
+bool account_call_transfer(const struct account *acc);
+bool account_rtcp_mux(const struct account *acc);
 const char *account_extra(const struct account *acc);
-
-
-/*
- * Audio-level
- */
-
-
-#define AULEVEL_MIN  (-96.0)
-#define AULEVEL_MAX    (0.0)
-
-
-double aulevel_calc_dbov(int fmt, const void *sampv, size_t sampc);
-
+int account_uri_complete_strdup(const struct account *acc, char **strp,
+				const struct pl *uri);
+int account_uri_complete(const struct account *acc, struct mbuf *buf,
+			 const char *uri);
+int account_answerdelay(const struct account *acc);
+void account_set_answerdelay(struct account *acc, int adelay);
+bool account_sip_autoanswer(const struct account *acc);
+void account_set_sip_autoanswer(struct account *acc, bool allow);
+bool account_sip_autoredirect(const struct account *acc);
+void account_set_sip_autoredirect(struct account *acc, bool allow);
+enum sipansbeep account_sipansbeep(const struct account *acc);
+void account_set_sipansbeep(struct account *acc, enum sipansbeep beep);
+void account_set_autelev_pt(struct account *acc, uint32_t pt);
+uint32_t account_autelev_pt(struct account *acc);
+const char* account_uas_user(const struct account *acc);
+const char* account_uas_pass(const struct account *acc);
+bool account_uas_isset(const struct account *acc);
 
 /*
  * Call
@@ -112,8 +172,10 @@ double aulevel_calc_dbov(int fmt, const void *sampv, size_t sampc);
 
 enum call_event {
 	CALL_EVENT_INCOMING,
+	CALL_EVENT_OUTGOING,
 	CALL_EVENT_RINGING,
 	CALL_EVENT_PROGRESS,
+	CALL_EVENT_ANSWERED,
 	CALL_EVENT_ESTABLISHED,
 	CALL_EVENT_CLOSED,
 	CALL_EVENT_TRANSFER,
@@ -121,35 +183,76 @@ enum call_event {
 	CALL_EVENT_MENC,
 };
 
+/** Call States */
+enum call_state {
+	CALL_STATE_IDLE = 0,
+	CALL_STATE_INCOMING,
+	CALL_STATE_OUTGOING,
+	CALL_STATE_RINGING,
+	CALL_STATE_EARLY,
+	CALL_STATE_ESTABLISHED,
+	CALL_STATE_TERMINATED,
+	CALL_STATE_TRANSFER,
+	CALL_STATE_UNKNOWN
+};
+
+/** Supported tags */
+enum supported_tags {
+	REPLACES = 1,
+};
+
+/** Video mode */
+enum vidmode {
+	VIDMODE_OFF = 0,    /**< Video disabled                */
+	VIDMODE_ON,         /**< Video enabled                 */
+};
+
 struct call;
 
 typedef void (call_event_h)(struct call *call, enum call_event ev,
 			    const char *str, void *arg);
 typedef void (call_dtmf_h)(struct call *call, char key, void *arg);
+typedef bool (call_match_h)(const struct call *call, void *arg);
+typedef void (call_list_h)(struct call *call, void *arg);
+
 
 int  call_connect(struct call *call, const struct pl *paddr);
-int  call_answer(struct call *call, uint16_t scode);
+int  call_answer(struct call *call, uint16_t scode, enum vidmode vmode);
+int  call_progress_dir(struct call *call,
+		       enum sdp_dir adir, enum sdp_dir vdir);
 int  call_progress(struct call *call);
-int  call_hangup(struct call *call, uint16_t scode, const char *reason);
+void call_hangup(struct call *call, uint16_t scode, const char *reason);
 int  call_modify(struct call *call);
 int  call_hold(struct call *call, bool hold);
+void call_set_audio_ldir(struct call *call, enum sdp_dir dir);
+void call_set_video_ldir(struct call *call, enum sdp_dir dir);
+int  call_set_video_dir(struct call *call, enum sdp_dir dir);
+int  call_update_media(struct call *call);
 int  call_send_digit(struct call *call, char key);
 bool call_has_audio(const struct call *call);
 bool call_has_video(const struct call *call);
+bool call_early_video_available(const struct call *call);
+bool call_refresh_allowed(const struct call *call);
+bool call_ack_pending(const struct call *call);
 int  call_transfer(struct call *call, const char *uri);
+int  call_replace_transfer(struct call *target_call, struct call *source_call);
 int  call_status(struct re_printf *pf, const struct call *call);
 int  call_debug(struct re_printf *pf, const struct call *call);
 int  call_notify_sipfrag(struct call *call, uint16_t scode,
 			 const char *reason, ...);
 void call_set_handlers(struct call *call, call_event_h *eh,
 		       call_dtmf_h *dtmfh, void *arg);
+struct account *call_account(const struct call *call);
 uint16_t      call_scode(const struct call *call);
+enum call_state call_state(const struct call *call);
 uint32_t      call_duration(const struct call *call);
 uint32_t      call_setup_duration(const struct call *call);
 const char   *call_id(const struct call *call);
 const char   *call_peeruri(const struct call *call);
 const char   *call_peername(const struct call *call);
 const char   *call_localuri(const struct call *call);
+const char   *call_alerturi(const struct call *call);
+const char   *call_diverteruri(const struct call *call);
 struct audio *call_audio(const struct call *call);
 struct video *call_video(const struct call *call);
 struct list  *call_streaml(const struct call *call);
@@ -158,11 +261,27 @@ bool          call_is_onhold(const struct call *call);
 bool          call_is_outgoing(const struct call *call);
 void          call_enable_rtp_timeout(struct call *call, uint32_t timeout_ms);
 uint32_t      call_linenum(const struct call *call);
+int32_t       call_answer_delay(const struct call *call);
+void          call_set_answer_delay(struct call *call, int32_t adelay);
 struct call  *call_find_linenum(const struct list *calls, uint32_t linenum);
 struct call  *call_find_id(const struct list *calls, const char *id);
 void call_set_current(struct list *calls, struct call *call);
 const struct list *call_get_custom_hdrs(const struct call *call);
-
+void call_set_media_direction(struct call *call, enum sdp_dir a,
+			     enum sdp_dir v);
+void call_set_mdir(struct call *call, enum sdp_dir a, enum sdp_dir v);
+void call_get_mdir(struct call *call, enum sdp_dir *ap, enum sdp_dir *vp);
+void call_set_media_estdir(struct call *call, enum sdp_dir a, enum sdp_dir v);
+void call_start_answtmr(struct call *call, uint32_t ms);
+bool          call_supported(struct call *call, uint16_t tags);
+const char   *call_user_data(const struct call *call);
+int call_set_user_data(struct call *call, const char *user_data);
+void call_set_evstop(struct call *call, bool stop);
+bool call_is_evstop(struct call *call);
+int call_msg_src(const struct call *call, struct sa *sa);
+enum sip_transp call_transp(const struct call *call);
+enum sdp_neg_state call_sdp_neg_state(const struct call *call);
+bool call_sdp_change_allowed(const struct call *call);
 
 /*
  * Custom headers
@@ -179,32 +298,38 @@ int custom_hdrs_apply(const struct list *hdrs, custom_hdrs_h *h, void *arg);
  * Conf (utils)
  */
 
-
-/** Defines the configuration line handler */
-typedef int (confline_h)(const struct pl *addr, void *arg);
-
-int  conf_configure(void);
-int  conf_modules(void);
-void conf_path_set(const char *path);
-int  conf_path_get(char *path, size_t sz);
-int  conf_parse(const char *filename, confline_h *ch, void *arg);
-int  conf_get_vidsz(const struct conf *conf, const char *name,
-		    struct vidsz *sz);
-int  conf_get_sa(const struct conf *conf, const char *name, struct sa *sa);
-bool conf_fileexist(const char *path);
-void conf_close(void);
-struct conf *conf_cur(void);
-
-
-/*
- * Config (core configuration)
- */
-
 /** A range of numbers */
 struct range {
 	uint32_t min;  /**< Minimum number */
 	uint32_t max;  /**< Maximum number */
 };
+
+
+/** Defines the configuration line handler */
+typedef int (confline_h)(const struct pl *addr, void *arg);
+
+int  conf_configure(void);
+int  conf_configure_buf(const uint8_t *buf, size_t sz);
+int  conf_modules(void);
+int  conf_path_set(const char *path);
+int  conf_path_get(char *path, size_t sz);
+int  conf_parse(const char *filename, confline_h *ch, void *arg);
+int  conf_get_range(const struct conf *conf, const char *name,
+		    struct range *rng);
+int  conf_get_vidsz(const struct conf *conf, const char *name,
+		    struct vidsz *sz);
+int  conf_get_sa(const struct conf *conf, const char *name, struct sa *sa);
+enum jbuf_type conf_get_jbuf_type(const struct pl *pl);
+bool conf_aubuf_adaptive(const struct pl *pl);
+void conf_close(void);
+struct conf *conf_cur(void);
+int conf_loadfile(struct mbuf **mbp, const char *filename);
+const char *fs_file_extension(const char *filename);
+
+
+/*
+ * Config (core configuration)
+ */
 
 static inline bool in_range(const struct range *rng, uint32_t val)
 {
@@ -217,6 +342,15 @@ enum audio_mode {
 	AUDIO_MODE_THREAD,           /**< Use dedicated thread          */
 };
 
+/** RTP receive mode */
+enum rtp_receive_mode {
+	RECEIVE_MODE_MAIN = 0,  /**< RTP RX is processed in main thread      */
+	RECEIVE_MODE_THREAD,    /**< RTP RX is processed in separate thread  */
+};
+
+enum rtp_receive_mode resolve_receive_mode(const struct pl *fmt);
+const char *rtp_receive_mode_str(enum rtp_receive_mode rxmode);
+
 
 /** SIP User-Agent */
 struct config_sip {
@@ -224,12 +358,22 @@ struct config_sip {
 	char local[64];         /**< Local SIP Address              */
 	char cert[256];         /**< SIP Certificate                */
 	char cafile[256];       /**< SIP CA-file                    */
+	char capath[256];       /**< SIP CA-path                    */
+	uint32_t transports;    /**< Supported transports mask      */
+	enum sip_transp transp; /**< Default outgoing SIP transport protocol */
+	bool verify_server;     /**< Enable SIP TLS verify server   */
+	bool verify_client;     /**< Enable SIP TLS verify client   */
+	enum tls_resume_mode tls_resume; /** TLS resumption mode    */
+	uint8_t tos;            /**< Type-of-Service for SIP        */
+	uint32_t reg_filt;	/**< Registrar filter transport mask*/
 };
 
 /** Call config */
 struct config_call {
 	uint32_t local_timeout; /**< Incoming call timeout [sec] 0=off    */
 	uint32_t max_calls;     /**< Maximum number of calls, 0=unlimited */
+	bool hold_other_calls;  /**< Hold other calls */
+	bool accept;            /**< Accept call by baresip core          */
 };
 
 /** Audio */
@@ -252,6 +396,9 @@ struct config_audio {
 	int enc_fmt;            /**< Audio encoder sample format    */
 	int dec_fmt;            /**< Audio decoder sample format    */
 	struct range buffer;    /**< Audio receive buffer in [ms]   */
+	bool adaptive;          /**< Enable adaptive audio buffer   */
+	double silence;         /**< Silence volume in [dB]         */
+	uint32_t telev_pt;      /**< Payload type for tel.-event    */
 };
 
 /** Video */
@@ -262,6 +409,8 @@ struct config_video {
 	char disp_dev[128];     /**< Video display device           */
 	unsigned width, height; /**< Video resolution               */
 	uint32_t bitrate;       /**< Encoder bitrate in [bit/s]     */
+	uint32_t send_bitrate;  /**< Sender bitrate in [bit/s]      */
+	uint32_t burst_bits;    /**< Number of Burst bits           */
 	double fps;             /**< Video framerate                */
 	bool fullscreen;        /**< Enable fullscreen display      */
 	int enc_fmt;            /**< Encoder pixelfmt (enum vidfmt) */
@@ -270,12 +419,22 @@ struct config_video {
 /** Audio/Video Transport */
 struct config_avt {
 	uint8_t rtp_tos;        /**< Type-of-Service for outg. RTP  */
+	uint8_t rtpv_tos;       /**< TOS for outg. video RTP        */
 	struct range rtp_ports; /**< RTP port range                 */
 	struct range rtp_bw;    /**< RTP Bandwidth range [bit/s]    */
 	bool rtcp_mux;          /**< RTP/RTCP multiplexing          */
-	struct range jbuf_del;  /**< Delay, number of frames        */
+	struct {
+		enum jbuf_type jbtype;  /**< Jitter buffer type     */
+		struct range jbuf_del;  /**< Delay, number of frames*/
+	} audio;
+	struct {
+		enum jbuf_type jbtype;  /**< Jitter buffer type     */
+		struct range jbuf_del;  /**< Delay, number of frames*/
+	} video;
 	bool rtp_stats;         /**< Enable RTP statistics          */
 	uint32_t rtp_timeout;   /**< RTP Timeout in seconds (0=off) */
+	bool bundle;            /**< Media Multiplexing (BUNDLE)    */
+	enum rtp_receive_mode rxmode;   /**< RTP RX processing mode */
 };
 
 /** Network Configuration */
@@ -284,8 +443,11 @@ struct config_net {
 	char ifname[64];        /**< Bind to interface (optional)   */
 	struct {
 		char addr[64];
-	} nsv[NET_MAX_NS];      /**< Configured DNS nameservers     */
-	size_t nsc;             /**< Number of DNS nameservers      */
+		bool fallback;
+	} nsv[NET_MAX_NS];      /**< Configured DNS nameservers         */
+	size_t nsc;             /**< Number of DNS nameservers          */
+	bool use_linklocal;     /**< Use v4/v6 link-local addresses     */
+	bool use_getaddrinfo;   /**< Use getaddrinfo for A/AAAA records */
 };
 
 
@@ -353,23 +515,23 @@ struct contact *contacts_current(const struct contacts *contacts);
 
 
 /*
- * Media Context
- */
-
-/** Media Context */
-struct media_ctx {
-	const char *id;  /**< Media Context identifier */
-};
-
-
-/*
  * Media Device
  */
 
 /** Defines a media device */
 struct mediadev {
-	struct le   le;
-	char  *name;
+	struct le le;
+	char *name;
+
+	/* Generic: */
+	struct {
+		uint32_t channels;
+		bool is_default;
+	} src, play;
+
+	/* Module/driver specific: */
+	int host_index;
+	int device_index;
 };
 
 int mediadev_add(struct list *dev_list, const char *name);
@@ -394,6 +556,9 @@ int  message_listen(struct message *message,
 void message_unlisten(struct message *message, message_recv_h *recvh);
 int  message_send(struct ua *ua, const char *peer, const char *msg,
 		  sip_resp_h *resph, void *arg);
+int message_encode_dict(struct odict *od, struct account *acc,
+			const struct pl *peer, const struct pl *ctype,
+			struct mbuf *body);
 
 
 /*
@@ -409,15 +574,17 @@ struct ausrc_prm {
 	uint8_t    ch;          /**< Number of channels         */
 	uint32_t   ptime;       /**< Wanted packet-time in [ms] */
 	int        fmt;         /**< Sample format (enum aufmt) */
+	size_t     duration;    /**< Duration in [ms], 0 for infinite        */
 };
 
-typedef void (ausrc_read_h)(const void *sampv, size_t sampc, void *arg);
+typedef void (ausrc_read_h)(struct auframe *af, void *arg);
 typedef void (ausrc_error_h)(int err, const char *str, void *arg);
 
 typedef int  (ausrc_alloc_h)(struct ausrc_st **stp, const struct ausrc *ausrc,
-			     struct media_ctx **ctx,
 			     struct ausrc_prm *prm, const char *device,
 			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg);
+typedef int  (ausrc_info_h)(const struct ausrc *ausrc,
+			    struct ausrc_prm *prm, const char *device);
 
 /** Defines an Audio Source */
 struct ausrc {
@@ -425,17 +592,18 @@ struct ausrc {
 	const char      *name;
 	struct list      dev_list;
 	ausrc_alloc_h   *alloch;
+	ausrc_info_h    *infoh;
 };
 
 int ausrc_register(struct ausrc **asp, struct list *ausrcl, const char *name,
 		   ausrc_alloc_h *alloch);
 const struct ausrc *ausrc_find(const struct list *ausrcl, const char *name);
 int ausrc_alloc(struct ausrc_st **stp, struct list *ausrcl,
-		struct media_ctx **ctx,
 		const char *name,
 		struct ausrc_prm *prm, const char *device,
 		ausrc_read_h *rh, ausrc_error_h *errh, void *arg);
-struct ausrc *ausrc_get(struct ausrc_st *st);
+int ausrc_info(struct list *ausrcl,
+	       const char *name, struct ausrc_prm *prm, const char *device);
 
 
 /*
@@ -453,7 +621,7 @@ struct auplay_prm {
 	int        fmt;         /**< Sample format (enum aufmt) */
 };
 
-typedef void (auplay_write_h)(void *sampv, size_t sampc, void *arg);
+typedef void (auplay_write_h)(struct auframe *af, void *arg);
 
 typedef int  (auplay_alloc_h)(struct auplay_st **stp, const struct auplay *ap,
 			      struct auplay_prm *prm, const char *device,
@@ -474,7 +642,6 @@ int auplay_alloc(struct auplay_st **stp, struct list *auplayl,
 		 const char *name,
 		 struct auplay_prm *prm, const char *device,
 		 auplay_write_h *wh, void *arg);
-struct auplay *auplay_get(struct auplay_st *st);
 
 
 /*
@@ -505,17 +672,18 @@ typedef int (aufilt_encupd_h)(struct aufilt_enc_st **stp, void **ctx,
 			      const struct aufilt *af, struct aufilt_prm *prm,
 			      const struct audio *au);
 typedef int (aufilt_encode_h)(struct aufilt_enc_st *st,
-			      void *sampv, size_t *sampc);
+			      struct auframe *af);
 
 typedef int (aufilt_decupd_h)(struct aufilt_dec_st **stp, void **ctx,
 			      const struct aufilt *af, struct aufilt_prm *prm,
 			      const struct audio *au);
 typedef int (aufilt_decode_h)(struct aufilt_dec_st *st,
-			      void *sampv, size_t *sampc);
+			      struct auframe *af);
 
 struct aufilt {
 	struct le le;
 	const char *name;
+	bool enabled;
 	aufilt_encupd_h *encupdh;
 	aufilt_encode_h *ench;
 	aufilt_decupd_h *decupdh;
@@ -524,6 +692,7 @@ struct aufilt {
 
 void aufilt_register(struct list *aufiltl, struct aufilt *af);
 void aufilt_unregister(struct aufilt *af);
+void aufilt_enable(struct list *aufiltl, const char *name, bool enable);
 
 
 /*
@@ -552,6 +721,8 @@ const char *log_level_name(enum log_level level);
 void log_enable_debug(bool enable);
 void log_enable_info(bool enable);
 void log_enable_stdout(bool enable);
+void log_enable_timestamps(bool enable);
+void log_enable_color(bool enable);
 void vlog(enum log_level level, const char *fmt, va_list ap);
 void loglv(enum log_level level, const char *fmt, ...);
 void debug(const char *fmt, ...);
@@ -592,6 +763,8 @@ typedef int  (menc_media_h)(struct menc_media **mp, struct menc_sess *sess,
 			   struct sdp_media *sdpm,
 			   const struct stream *strm);
 
+typedef int (menc_txrekey_h)(struct menc_media *m);
+
 struct menc {
 	struct le le;
 	const char *id;
@@ -599,6 +772,7 @@ struct menc {
 	bool wait_secure;
 	menc_sess_h *sessh;
 	menc_media_h *mediah;
+	menc_txrekey_h *txrekeyh;
 };
 
 void menc_register(struct list *mencl, struct menc *menc);
@@ -619,17 +793,26 @@ int  net_alloc(struct network **netp, const struct config_net *cfg);
 int  net_use_nameserver(struct network *net,
 			const struct sa *srvv, size_t srvc);
 int  net_set_address(struct network *net, const struct sa *ip);
-void net_change(struct network *net, uint32_t interval,
-		net_change_h *ch, void *arg);
-void net_force_change(struct network *net);
-bool net_check(struct network *net);
+int  net_add_address(struct network *net, const struct sa *ip);
+int  net_add_address_ifname(struct network *net, const struct sa *sa,
+			    const char *ifname);
+int  net_flush_addresses(struct network *net);
+int  net_rm_address(struct network *net, const struct sa *ip);
 bool net_af_enabled(const struct network *net, int af);
 int  net_set_af(struct network *net, int af);
+void net_dns_refresh(struct network *net);
 int  net_dns_debug(struct re_printf *pf, const struct network *net);
 int  net_debug(struct re_printf *pf, const struct network *net);
+bool net_laddr_apply(const struct network *net, net_ifaddr_h *ifh, void *arg);
+bool net_ifaddr_filter(const struct network *net, const char *ifname,
+		       const struct sa *sa);
 const struct sa *net_laddr_af(const struct network *net, int af);
-const char      *net_domain(const struct network *net);
+const struct sa *net_laddr_for(const struct network *net,
+			       const struct sa *dst);
+bool net_is_laddr(const struct network *net, struct sa *sa);
+int net_set_dst_scopeid(const struct network *net, struct sa *dst);
 struct dnsc     *net_dnsc(const struct network *net);
+int net_set_dnsc(struct network *net, struct dnsc *dnsc);
 
 
 /*
@@ -638,6 +821,7 @@ struct dnsc     *net_dnsc(const struct network *net);
 
 struct play;
 struct player;
+typedef void (play_finish_h)(struct play *play, void *arg);
 
 int  play_file(struct play **playp, struct player *player,
 	       const char *filename, int repeat,
@@ -646,6 +830,7 @@ int  play_tone(struct play **playp, struct player *player,
 	       struct mbuf *tone,
 	       uint32_t srate, uint8_t ch, int repeat,
 	       const char *play_mod, const char *play_dev);
+void play_set_finish_handler(struct play *play, play_finish_h *fh, void *arg);
 int  play_init(struct player **playerp);
 void play_set_path(struct player *player, const char *path);
 
@@ -662,16 +847,22 @@ enum ua_event {
 	UA_EVENT_REGISTER_OK,
 	UA_EVENT_REGISTER_FAIL,
 	UA_EVENT_UNREGISTERING,
+	UA_EVENT_FALLBACK_OK,
+	UA_EVENT_FALLBACK_FAIL,
 	UA_EVENT_MWI_NOTIFY,
+	UA_EVENT_CREATE,
 	UA_EVENT_SHUTDOWN,
 	UA_EVENT_EXIT,
 
 	UA_EVENT_CALL_INCOMING,
+	UA_EVENT_CALL_OUTGOING,
 	UA_EVENT_CALL_RINGING,
 	UA_EVENT_CALL_PROGRESS,
+	UA_EVENT_CALL_ANSWERED,
 	UA_EVENT_CALL_ESTABLISHED,
 	UA_EVENT_CALL_CLOSED,
 	UA_EVENT_CALL_TRANSFER,
+	UA_EVENT_CALL_REDIRECT,
 	UA_EVENT_CALL_TRANSFER_FAILED,
 	UA_EVENT_CALL_DTMF_START,
 	UA_EVENT_CALL_DTMF_END,
@@ -683,20 +874,35 @@ enum ua_event {
 	UA_EVENT_AUDIO_ERROR,
 	UA_EVENT_CALL_LOCAL_SDP,      /**< param: offer or answer */
 	UA_EVENT_CALL_REMOTE_SDP,     /**< param: offer or answer */
+	UA_EVENT_CALL_HOLD,           /**< Call put on-hold by peer          */
+	UA_EVENT_CALL_RESUME,         /**< Call resumed by peer              */
+	UA_EVENT_REFER,
+	UA_EVENT_MODULE,
+	UA_EVENT_END_OF_FILE,
+	UA_EVENT_CUSTOM,
+	UA_EVENT_SIPSESS_CONN,
 
 	UA_EVENT_MAX,
 };
 
-/** Video mode */
-enum vidmode {
-	VIDMODE_OFF = 0,    /**< Video disabled                */
-	VIDMODE_ON,         /**< Video enabled                 */
+
+struct bevent;
+
+
+/** SIP auto answer method */
+enum answer_method {
+	ANSM_NONE = 0,
+	ANSM_RFC5373,
+	ANSM_CALLINFO,
+	ANSM_ALERTINFO,
 };
 
 /** Defines the User-Agent event handler */
 typedef void (ua_event_h)(struct ua *ua, enum ua_event ev,
 			  struct call *call, const char *prm, void *arg);
+typedef void (bevent_h)(enum ua_event ev, struct bevent *event, void *arg);
 typedef void (options_resp_h)(int err, const struct sip_msg *msg, void *arg);
+typedef void (refer_resp_h)(int err, const struct sip_msg *msg, void *arg);
 
 typedef void (ua_exit_h)(void *arg);
 
@@ -705,66 +911,90 @@ int  ua_alloc(struct ua **uap, const char *aor);
 int  ua_connect(struct ua *ua, struct call **callp,
 		const char *from_uri, const char *req_uri,
 		enum vidmode vmode);
+int  ua_connect_dir(struct ua *ua, struct call **callp,
+		    const char *from_uri, const char *req_uri,
+		    enum vidmode vmode, enum sdp_dir adir, enum sdp_dir vdir);
 void ua_hangup(struct ua *ua, struct call *call,
 	       uint16_t scode, const char *reason);
-int  ua_answer(struct ua *ua, struct call *call);
-int  ua_hold_answer(struct ua *ua, struct call *call);
+int  ua_accept(struct ua *ua, const struct sip_msg *msg);
+int  ua_answer(struct ua *ua, struct call *call, enum vidmode vmode);
+int  ua_hold_answer(struct ua *ua, struct call *call, enum vidmode vmode);
 int  ua_options_send(struct ua *ua, const char *uri,
 		     options_resp_h *resph, void *arg);
+int  ua_refer_send(struct ua *ua, const char *uri, const char *referto,
+		    refer_resp_h *resph, void *arg);
 int  ua_debug(struct re_printf *pf, const struct ua *ua);
+int  ua_state_json_api(struct odict *od, const struct ua *ua);
 int  ua_print_calls(struct re_printf *pf, const struct ua *ua);
 int  ua_print_status(struct re_printf *pf, const struct ua *ua);
 int  ua_print_supported(struct re_printf *pf, const struct ua *ua);
 int  ua_update_account(struct ua *ua);
 int  ua_register(struct ua *ua);
+int  ua_fallback(struct ua *ua);
 void ua_unregister(struct ua *ua);
+void ua_stop_register(struct ua *ua);
 bool ua_isregistered(const struct ua *ua);
+bool ua_regfailed(const struct ua *ua);
 unsigned ua_destroy(struct ua *ua);
 void ua_pub_gruu_set(struct ua *ua, const struct pl *pval);
-const char     *ua_aor(const struct ua *ua);
 const char     *ua_cuser(const struct ua *ua);
 const char     *ua_local_cuser(const struct ua *ua);
 struct account *ua_account(const struct ua *ua);
 const char     *ua_outbound(const struct ua *ua);
 struct call    *ua_call(const struct ua *ua);
-struct call    *ua_prev_call(const struct ua *ua);
 struct list    *ua_calls(const struct ua *ua);
 enum presence_status ua_presence_status(const struct ua *ua);
-void ua_presence_status_set(struct ua *ua, const enum presence_status status);
-void ua_set_media_af(struct ua *ua, int af_media);
+void ua_presence_status_set(struct ua *ua, enum presence_status status);
 void ua_set_catchall(struct ua *ua, bool enabled);
-void ua_event(struct ua *ua, enum ua_event ev, struct call *call,
-	      const char *fmt, ...);
 int ua_add_xhdr_filter(struct ua *ua, const char *hdr_name);
 int  ua_set_custom_hdrs(struct ua *ua, struct list *custom_hdrs);
-int  ua_uri_complete(struct ua *ua, struct mbuf *buf, const char *uri);
+int  ua_add_custom_hdr(struct ua *ua, const struct pl *name,
+		       const struct pl *value);
+int  ua_rm_custom_hdr(struct ua *ua, struct pl *name);
+int  ua_enable_autoanswer(struct ua *ua, int32_t adelay,
+		enum answer_method met);
+int  ua_disable_autoanswer(struct ua *ua, enum answer_method met);
 int  ua_call_alloc(struct call **callp, struct ua *ua,
 		   enum vidmode vidmode, const struct sip_msg *msg,
 		   struct call *xcall, const char *local_uri,
 		   bool use_rtp);
+struct call *ua_find_call_state(const struct ua *ua, enum call_state st);
+int ua_raise(struct ua *ua);
+int ua_set_autoanswer_value(struct ua *ua, const char *value);
+void ua_add_extension(struct ua *ua, const char *extension);
+void ua_remove_extension(struct ua *ua, const char *extension);
+bool ua_req_allowed(const struct ua *ua, const struct sip_msg *msg);
+bool ua_req_check_origin(const struct ua *ua, const struct sip_msg *msg);
 
 
 /* One instance */
 int  ua_init(const char *software, bool udp, bool tcp, bool tls);
 void ua_close(void);
 void ua_stop_all(bool forced);
+int  uag_hold_resume(struct call *call);
+int  uag_hold_others(struct call *call);
+void uag_set_nodial(bool nodial);
+bool uag_nodial(void);
 void uag_set_exit_handler(ua_exit_h *exith, void *arg);
 void uag_enable_sip_trace(bool enable);
 int  uag_reset_transp(bool reg, bool reinvite);
-int  uag_event_register(ua_event_h *eh, void *arg);
-void uag_event_unregister(ua_event_h *eh);
 void uag_set_sub_handler(sip_msg_h *subh);
 int  uag_set_extra_params(const char *eprm);
+int  uag_enable_transport(enum sip_transp tp, bool en);
 struct ua   *uag_find(const struct pl *cuser);
+struct ua   *uag_find_msg(const struct sip_msg *msg);
 struct ua   *uag_find_aor(const char *aor);
 struct ua   *uag_find_param(const char *name, const char *val);
+struct ua   *uag_find_requri_pl(const struct pl *requri);
+struct ua   *uag_find_requri(const char *requri);
 struct sip  *uag_sip(void);
-const char  *uag_event_str(enum ua_event ev);
 struct list *uag_list(void);
-void         uag_current_set(struct ua *ua);
-struct ua   *uag_current(void);
+uint32_t     uag_call_count(void);
+struct tls  *uag_tls(void);
 struct sipsess_sock  *uag_sipsess_sock(void);
 struct sipevent_sock *uag_sipevent_sock(void);
+struct call *uag_call_find(const char *id);
+void uag_filter_calls(call_list_h *listh, call_match_h *matchh, void *arg);
 
 
 /*
@@ -861,6 +1091,16 @@ struct vidsrc_prm {
 	int fmt;          /**< Wanted pixel format (enum vidfmt)           */
 };
 
+struct vidpacket {
+	uint8_t *buf;        /**< Buffer memory                     */
+	size_t size;         /**< Size of buffer                    */
+	uint64_t timestamp;  /**< Timestamp in VIDEO_TIMEBASE units */
+	bool keyframe;       /**< True=keyframe, False=deltaframe   */
+};
+
+/* Declare function pointer */
+typedef void (vidsrc_packet_h)(struct vidpacket *packet, void *arg);
+
 /**
  * Provides video frames to the core
  *
@@ -873,10 +1113,11 @@ typedef void (vidsrc_frame_h)(struct vidframe *frame, uint64_t timestamp,
 typedef void (vidsrc_error_h)(int err, void *arg);
 
 typedef int  (vidsrc_alloc_h)(struct vidsrc_st **vsp, const struct vidsrc *vs,
-			      struct media_ctx **ctx, struct vidsrc_prm *prm,
+			      struct vidsrc_prm *prm,
 			      const struct vidsz *size,
 			      const char *fmt, const char *dev,
 			      vidsrc_frame_h *frameh,
+			      vidsrc_packet_h  *packeth,
 			      vidsrc_error_h *errorh, void *arg);
 
 typedef void (vidsrc_update_h)(struct vidsrc_st *st, struct vidsrc_prm *prm,
@@ -896,10 +1137,10 @@ int vidsrc_register(struct vidsrc **vp, struct list *vidsrcl, const char *name,
 const struct vidsrc *vidsrc_find(const struct list *vidsrcl, const char *name);
 int vidsrc_alloc(struct vidsrc_st **stp, struct list *vidsrcl,
 		 const char *name,
-		 struct media_ctx **ctx, struct vidsrc_prm *prm,
+		 struct vidsrc_prm *prm,
 		 const struct vidsz *size, const char *fmt, const char *dev,
-		 vidsrc_frame_h *frameh, vidsrc_error_h *errorh, void *arg);
-struct vidsrc *vidsrc_get(struct vidsrc_st *st);
+		 vidsrc_frame_h *frameh, vidsrc_packet_h *packeth,
+		 vidsrc_error_h *errorh, void *arg);
 
 
 /*
@@ -943,10 +1184,7 @@ int vidisp_alloc(struct vidisp_st **stp, struct list *vidispl,
 		 const char *name,
 		 struct vidisp_prm *prm, const char *dev,
 		 vidisp_resize_h *resizeh, void *arg);
-int vidisp_display(struct vidisp_st *st, const char *title,
-		   const struct vidframe *frame, uint64_t timestamp);
 const struct vidisp *vidisp_find(const struct list *vidispl, const char *name);
-struct vidisp *vidisp_get(struct vidisp_st *st);
 
 
 /*
@@ -955,7 +1193,6 @@ struct vidisp *vidisp_get(struct vidisp_st *st);
 
 /** Audio Codec parameters */
 struct auenc_param {
-	uint32_t ptime;    /**< Packet time in [ms]       */
 	uint32_t bitrate;  /**< Wanted bitrate in [bit/s] */
 };
 
@@ -1021,25 +1258,36 @@ struct videnc_state;
 struct viddec_state;
 struct vidcodec;
 
+struct viddec_packet {
+	bool intra;		      /**< True=keyframe, False=deltaframe   */
+	const struct rtp_header *hdr; /**< RTP Header                        */
+	uint64_t timestamp;	      /**< Timestamp in VIDEO_TIMEBASE units */
+	struct mbuf *mb;	      /**< RTP Buffer memory                 */
+};
+
 typedef int (videnc_packet_h)(bool marker, uint64_t rtp_ts,
 			      const uint8_t *hdr, size_t hdr_len,
 			      const uint8_t *pld, size_t pld_len,
-			      void *arg);
+			      const struct video *vid);
 
 typedef int (videnc_update_h)(struct videnc_state **vesp,
 			      const struct vidcodec *vc,
 			      struct videnc_param *prm, const char *fmtp,
-			      videnc_packet_h *pkth, void *arg);
+			      videnc_packet_h *pkth, const struct video *vid);
 
 typedef int (videnc_encode_h)(struct videnc_state *ves, bool update,
 			      const struct vidframe *frame,
 			      uint64_t timestamp);
 
-typedef int (viddec_update_h)(struct viddec_state **vdsp,
-			      const struct vidcodec *vc, const char *fmtp);
+typedef int (videnc_packetize_h)(struct videnc_state *ves,
+				 const struct vidpacket *packet);
+
+typedef int(viddec_update_h)(struct viddec_state **vdsp,
+			     const struct vidcodec *vc, const char *fmtp,
+			     const struct video *vid);
+
 typedef int (viddec_decode_h)(struct viddec_state *vds, struct vidframe *frame,
-                              bool *intra, bool marker, uint16_t seq,
-                              struct mbuf *mb);
+                              struct viddec_packet *pkt);
 
 struct vidcodec {
 	struct le le;
@@ -1053,6 +1301,7 @@ struct vidcodec {
 	viddec_decode_h *dech;
 	sdp_fmtp_enc_h *fmtp_ench;
 	sdp_fmtp_cmp_h *fmtp_cmph;
+	videnc_packetize_h *packetizeh;
 };
 
 void vidcodec_register(struct list *vidcodecl, struct vidcodec *vc);
@@ -1139,7 +1388,7 @@ typedef void (audio_err_h)(int err, const char *str, void *arg);
 int audio_alloc(struct audio **ap, struct list *streaml,
 		const struct stream_param *stream_prm,
 		const struct config *cfg,
-		struct account *acc, struct sdp_session *sdp_sess, int label,
+		struct account *acc, struct sdp_session *sdp_sess,
 		const struct mnat *mnat, struct mnat_sess *mnat_sess,
 		const struct menc *menc, struct menc_sess *menc_sess,
 		uint32_t ptime, const struct list *aucodecl, bool offerer,
@@ -1154,19 +1403,26 @@ void audio_level_put(const struct audio *au, bool tx, double lvl);
 int  audio_level_get(const struct audio *au, double *level);
 int  audio_debug(struct re_printf *pf, const struct audio *a);
 struct stream *audio_strm(const struct audio *au);
+uint64_t audio_jb_current_value(const struct audio *au);
 int  audio_set_bitrate(struct audio *au, uint32_t bitrate);
 bool audio_rxaubuf_started(const struct audio *au);
+int  audio_update(struct audio *a);
 int  audio_start(struct audio *a);
+int  audio_start_source(struct audio *a, struct list *ausrcl,
+			struct list *aufiltl);
 void audio_stop(struct audio *a);
 bool audio_started(const struct audio *a);
 void audio_set_hold(struct audio *au, bool hold);
+int  audio_set_conference(struct audio *au, bool conference);
+bool audio_is_conference(const struct audio *au);
 int  audio_encoder_set(struct audio *a, const struct aucodec *ac,
 		       int pt_tx, const char *params);
 int  audio_decoder_set(struct audio *a, const struct aucodec *ac,
 		       int pt_rx, const char *params);
 const struct aucodec *audio_codec(const struct audio *au, bool tx);
 struct config_audio *audio_config(struct audio *au);
-void audio_set_media_context(struct audio *au, struct media_ctx **ctx);
+bool audio_txtelev_empty(const struct audio *au);
+void audio_call_telev_handler(const struct audio *au, int key, bool end);
 
 
 /*
@@ -1180,7 +1436,8 @@ typedef void (video_err_h)(int err, const char *str, void *arg);
 int  video_alloc(struct video **vp, struct list *streaml,
 		 const struct stream_param *stream_prm,
 		 const struct config *cfg,
-		 struct sdp_session *sdp_sess, int label,
+		 const struct account *acc,
+		 struct sdp_session *sdp_sess,
 		 const struct mnat *mnat, struct mnat_sess *mnat_sess,
 		 const struct menc *menc, struct menc_sess *menc_sess,
 		 const char *content, const struct list *vidcodecl,
@@ -1188,20 +1445,27 @@ int  video_alloc(struct video **vp, struct list *streaml,
 		 video_err_h *errh, void *arg);
 int  video_encoder_set(struct video *v, struct vidcodec *vc,
 		       int pt_tx, const char *params);
-int  video_start_source(struct video *v, struct media_ctx **ctx);
+int  video_update(struct video *v, const char *peer);
+int  video_start_source(struct video *v);
 int  video_start_display(struct video *v, const char *peer);
+void video_stop_display(struct video *v);
 void video_stop(struct video *v);
 int   video_set_fullscreen(struct video *v, bool fs);
 void  video_vidsrc_set_device(struct video *v, const char *dev);
 int   video_set_source(struct video *v, const char *name, const char *dev);
 void  video_set_devicename(struct video *v, const char *src, const char *disp);
+const char *video_get_src_dev(const struct video *v);
+const char *video_get_disp_dev(const struct video *v);
 int   video_debug(struct re_printf *pf, const struct video *v);
-uint64_t video_calc_rtp_timestamp_fix(uint64_t timestamp);
-double video_calc_seconds(uint64_t rtp_ts);
 struct stream *video_strm(const struct video *v);
-double video_timestamp_to_seconds(uint64_t timestamp);
-uint64_t video_calc_timebase_timestamp(uint64_t rtp_ts);
 const struct vidcodec *video_codec(const struct video *vid, bool tx);
+void video_sdp_attr_decode(struct video *v);
+void video_req_keyframe(struct video *vid);
+
+double video_calc_seconds(uint64_t rtp_ts);
+double video_timestamp_to_seconds(uint64_t timestamp);
+uint64_t video_calc_rtp_timestamp_fix(uint64_t timestamp);
+uint64_t video_calc_timebase_timestamp(uint64_t rtp_ts);
 
 
 /*
@@ -1210,10 +1474,14 @@ const struct vidcodec *video_codec(const struct video *vid, bool tx);
 
 /** Common parameters for media stream */
 struct stream_param {
-	bool use_rtp;
-	int af;
-	const char *cname;
+	bool use_rtp;       /**< Enable or disable RTP */
+	bool rtcp_mux;      /**< Enable or disable rtcp_mux */
+	int af;             /**< Wanted address family */
+	const char *cname;  /**< Canonical name        */
+	const char *peer;   /**< Peer uri/name or identifier  */
 };
+
+struct jbuf_stat;
 
 typedef void (stream_mnatconn_h)(struct stream *strm, void *arg);
 typedef void (stream_rtpestab_h)(struct stream *strm, void *arg);
@@ -1221,43 +1489,95 @@ typedef void (stream_rtcp_h)(struct stream *strm,
 			     struct rtcp_msg *msg, void *arg);
 typedef void (stream_error_h)(struct stream *strm, int err, void *arg);
 
-void stream_update(struct stream *s);
+int stream_update(struct stream *s);
 const struct rtcp_stats *stream_rtcp_stats(const struct stream *strm);
+int stream_jbuf_stats(const struct stream *strm, struct jbuf_stat *s);
 struct sdp_media *stream_sdpmedia(const struct stream *s);
 uint32_t stream_metric_get_tx_n_packets(const struct stream *strm);
 uint32_t stream_metric_get_tx_n_bytes(const struct stream *strm);
 uint32_t stream_metric_get_tx_n_err(const struct stream *strm);
+uint32_t stream_metric_get_tx_bitrate(const struct stream *strm);
+double stream_metric_get_tx_avg_bitrate(const struct stream *strm);
 uint32_t stream_metric_get_rx_n_packets(const struct stream *strm);
 uint32_t stream_metric_get_rx_n_bytes(const struct stream *strm);
 uint32_t stream_metric_get_rx_n_err(const struct stream *strm);
+uint32_t stream_metric_get_rx_bitrate(const struct stream *strm);
+double stream_metric_get_rx_avg_bitrate(const struct stream *strm);
 void stream_set_secure(struct stream *strm, bool secure);
 bool stream_is_secure(const struct stream *strm);
 int  stream_start_mediaenc(struct stream *strm);
-int  stream_start(const struct stream *strm);
+int  stream_start_rtcp(const struct stream *strm);
+int  stream_enable(struct stream *strm, bool enable);
+int  stream_enable_tx(struct stream *strm, bool enable);
+int  stream_enable_rx(struct stream *strm, bool enable);
+void stream_mnat_attr(struct stream *strm, const char *name,
+		      const char *value);
 void stream_set_session_handlers(struct stream *strm,
 				 stream_mnatconn_h *mnatconnh,
 				 stream_rtpestab_h *rtpestabh,
 				 stream_rtcp_h *rtcph,
 				 stream_error_h *errorh, void *arg);
+struct stream *stream_lookup_mid(const struct list *streaml,
+				 const char *mid, size_t len);
 const char *stream_name(const struct stream *strm);
+const char *stream_cname(const struct stream *strm);
+const char *stream_peer(const struct stream *strm);
+int  stream_bundle_init(struct stream *strm, bool offerer);
 int  stream_debug(struct re_printf *pf, const struct stream *s);
+void stream_enable_rtp_timeout(struct stream *strm, uint32_t timeout_ms);
+
+
+/**
+ * Jitter Buffer
+ */
+struct jbuf;
+struct rtp_header;
+
+/** Jitter buffer statistics */
+struct jbuf_stat {
+	uint32_t n_put;        /**< Number of frames put into jitter buffer */
+	uint32_t n_get;        /**< Number of frames got from jitter buffer */
+	uint32_t n_oos;        /**< Number of out-of-sequence frames        */
+	uint32_t n_dups;       /**< Number of duplicate frames detected     */
+	uint32_t n_late;       /**< Number of frames arriving too late      */
+	uint32_t n_lost;       /**< Number of lost frames                   */
+	uint32_t n_overflow;   /**< Number of overflows                     */
+	uint32_t n_underflow;  /**< Number of underflows                    */
+	uint32_t n_flush;      /**< Number of times jitter buffer flushed   */
+};
+
+
+int  jbuf_alloc(struct jbuf **jbp, uint32_t min, uint32_t max);
+int  jbuf_set_type(struct jbuf *jb, enum jbuf_type jbtype);
+void jbuf_set_gnack(struct jbuf *jb, struct rtp_sock *rtp);
+int  jbuf_put(struct jbuf *jb, const struct rtp_header *hdr, void *mem);
+int  jbuf_get(struct jbuf *jb, struct rtp_header *hdr, void **mem);
+int  jbuf_drain(struct jbuf *jb, struct rtp_header *hdr, void **mem);
+void jbuf_flush(struct jbuf *jb);
+int  jbuf_stats(const struct jbuf *jb, struct jbuf_stat *jstat);
+int  jbuf_debug(struct re_printf *pf, const struct jbuf *jb);
+uint32_t jbuf_frames(const struct jbuf *jb);
+uint32_t jbuf_packets(const struct jbuf *jb);
 
 
 /*
  * STUN URI
  */
 
+/** Defines the STUN uri scheme */
 enum stun_scheme {
-	STUN_SCHEME_STUN,
-	STUN_SCHEME_STUNS,
-	STUN_SCHEME_TURN,
-	STUN_SCHEME_TURNS,
+	STUN_SCHEME_STUN,  /**< STUN scheme        */
+	STUN_SCHEME_STUNS, /**< Secure STUN scheme */
+	STUN_SCHEME_TURN,  /**< TURN scheme        */
+	STUN_SCHEME_TURNS, /**< Secure TURN scheme */
 };
 
+/** Defines a STUN/TURN uri */
 struct stun_uri {
-	enum stun_scheme scheme;
-	char *host;
-	uint16_t port;
+	enum stun_scheme scheme;  /**< STUN Scheme            */
+	char *host;               /**< Hostname or IP-address */
+	uint16_t port;            /**< Port number            */
+	int proto;                /**< Transport protocol     */
 };
 
 int stunuri_decode(struct stun_uri **sup, const struct pl *pl);
@@ -1296,6 +1616,9 @@ typedef int (mnat_media_h)(struct mnat_media **mp, struct mnat_sess *sess,
 
 typedef int (mnat_update_h)(struct mnat_sess *sess);
 
+typedef void (mnat_attr_h)(struct mnat_media *mm,
+			   const char *name, const char *value);
+
 struct mnat {
 	struct le le;
 	const char *id;
@@ -1304,6 +1627,7 @@ struct mnat {
 	mnat_sess_h *sessh;
 	mnat_media_h *mediah;
 	mnat_update_h *updateh;
+	mnat_attr_h *attrh;
 };
 
 void mnat_register(struct list *mnatl, struct mnat *mnat);
@@ -1329,83 +1653,6 @@ int sip_req_send(struct ua *ua, const char *method, const char *uri,
 
 
 /*
- * H.264
- */
-
-/** NAL unit types (RFC 3984, Table 1) */
-enum {
-	H264_NAL_UNKNOWN      = 0,
-	/* 1-23   NAL unit  Single NAL unit packet per H.264 */
-	H264_NAL_SLICE        = 1,
-	H264_NAL_DPA          = 2,
-	H264_NAL_DPB          = 3,
-	H264_NAL_DPC          = 4,
-	H264_NAL_IDR_SLICE    = 5,
-	H264_NAL_SEI          = 6,
-	H264_NAL_SPS          = 7,
-	H264_NAL_PPS          = 8,
-	H264_NAL_AUD          = 9,
-	H264_NAL_END_SEQUENCE = 10,
-	H264_NAL_END_STREAM   = 11,
-	H264_NAL_FILLER_DATA  = 12,
-	H264_NAL_SPS_EXT      = 13,
-	H264_NAL_AUX_SLICE    = 19,
-
-	H264_NAL_STAP_A       = 24,  /**< Single-time aggregation packet */
-	H264_NAL_STAP_B       = 25,  /**< Single-time aggregation packet */
-	H264_NAL_MTAP16       = 26,  /**< Multi-time aggregation packet  */
-	H264_NAL_MTAP24       = 27,  /**< Multi-time aggregation packet  */
-	H264_NAL_FU_A         = 28,  /**< Fragmentation unit             */
-	H264_NAL_FU_B         = 29,  /**< Fragmentation unit             */
-};
-
-/**
- * H.264 Header defined in RFC 3984
- *
- * <pre>
-      +---------------+
-      |0|1|2|3|4|5|6|7|
-      +-+-+-+-+-+-+-+-+
-      |F|NRI|  Type   |
-      +---------------+
- * </pre>
- */
-struct h264_hdr {
-	unsigned f:1;      /**< 1 bit  - Forbidden zero bit (must be 0) */
-	unsigned nri:2;    /**< 2 bits - nal_ref_idc                    */
-	unsigned type:5;   /**< 5 bits - nal_unit_type                  */
-};
-
-int h264_hdr_encode(const struct h264_hdr *hdr, struct mbuf *mb);
-int h264_hdr_decode(struct h264_hdr *hdr, struct mbuf *mb);
-
-/** Fragmentation Unit header */
-struct h264_fu {
-	unsigned s:1;      /**< Start bit                               */
-	unsigned e:1;      /**< End bit                                 */
-	unsigned r:1;      /**< The Reserved bit MUST be equal to 0     */
-	unsigned type:5;   /**< The NAL unit payload type               */
-};
-
-int h264_fu_hdr_encode(const struct h264_fu *fu, struct mbuf *mb);
-int h264_fu_hdr_decode(struct h264_fu *fu, struct mbuf *mb);
-
-const uint8_t *h264_find_startcode(const uint8_t *p, const uint8_t *end);
-
-int h264_packetize(uint64_t rtp_ts, const uint8_t *buf, size_t len,
-		   size_t pktsize, videnc_packet_h *pkth, void *arg);
-int h264_nal_send(bool first, bool last,
-		  bool marker, uint32_t ihdr, uint64_t rtp_ts,
-		  const uint8_t *buf, size_t size, size_t maxsz,
-		  videnc_packet_h *pkth, void *arg);
-const char *h264_nalunit_name(int type);
-static inline bool h264_is_keyframe(int type)
-{
-	return type == H264_NAL_IDR_SLICE;
-}
-
-
-/*
  * Modules
  */
 
@@ -1417,7 +1664,7 @@ static inline bool h264_is_keyframe(int type)
 
 
 int  module_preload(const char *module);
-int  module_load(const char *name);
+int  module_load(const char *path, const char *name);
 void module_unload(const char *name);
 void module_app_unload(void);
 
@@ -1428,13 +1675,31 @@ void module_app_unload(void);
 
 int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 		      struct call *call, const char *prm);
-
-
-/*
- * Timer
- */
-
-uint64_t tmr_jiffies_usec(void);
+int odict_encode_bevent(struct odict *od, struct bevent *event);
+int event_add_au_jb_stat(struct odict *od_parent, const struct call *call);
+int  uag_event_register(ua_event_h *eh, void *arg);
+void uag_event_unregister(ua_event_h *eh);
+int  bevent_register(bevent_h *eh, void *arg);
+void bevent_unregister(bevent_h *eh);
+void ua_event(struct ua *ua, enum ua_event ev, struct call *call,
+	      const char *fmt, ...);
+int bevent_app_emit(enum ua_event ev, void *arg, const char *fmt, ...);
+int bevent_ua_emit(enum ua_event ev, struct ua *ua, const char *fmt, ...);
+int bevent_call_emit(enum ua_event ev, struct call *call,
+		     const char *fmt, ...);
+int bevent_sip_msg_emit(enum ua_event ev, const struct sip_msg *msg,
+			const char *fmt, ...);
+void module_event(const char *module, const char *event, struct ua *ua,
+		struct call *call, const char *fmt, ...);
+const char  *uag_event_str(enum ua_event ev);
+struct call    *bevent_get_call(const struct bevent *event);
+struct ua      *bevent_get_ua(const struct bevent *event);
+const struct sip_msg *bevent_get_msg(const struct bevent *event);
+void *bevent_get_apparg(const struct bevent *event);
+enum ua_event bevent_get_type(const struct bevent *event);
+const char *bevent_get_text(const struct bevent *event);
+void bevent_set_error(struct bevent *event, int err);
+void bevent_stop(struct bevent *event);
 
 
 /*
@@ -1459,6 +1724,139 @@ struct list   *baresip_vidsrcl(void);
 struct list   *baresip_vidispl(void);
 struct list   *baresip_vidfiltl(void);
 struct ui_sub *baresip_uis(void);
+
+
+/*
+ * Dialing numbers helpers
+ */
+
+int clean_number(char* str);
+
+
+/* bundle */
+
+int bundle_sdp_encode(struct sdp_session *sdp, const struct list *streaml);
+int bundle_sdp_decode(struct sdp_session *sdp, struct list *streaml);
+
+
+/*
+ * Session Description
+ */
+
+/* RTCSdpType */
+enum sdp_type {
+	SDP_NONE,
+	SDP_OFFER,
+	SDP_ANSWER,
+	SDP_ROLLBACK  /* special type */
+};
+
+/*
+ * https://developer.mozilla.org/en-US/docs/Web/API/RTCSessionDescription
+ *
+ * format:
+ *
+ * {
+ *   "type" : "answer",
+ *   "sdp" : "v=0\r\ns=-\r\n..."
+ * }
+ */
+struct session_description {
+	enum sdp_type type;
+	struct mbuf *sdp;
+};
+
+int session_description_encode(struct odict **odp,
+			       enum sdp_type type, struct mbuf *sdp);
+int session_description_decode(struct session_description *sd,
+			       struct mbuf *mb);
+void session_description_reset(struct session_description *sd);
+const char *sdptype_name(enum sdp_type type);
+
+
+/*
+ * WebRTC Media Track
+ */
+
+enum media_kind {
+	MEDIA_KIND_AUDIO,
+	MEDIA_KIND_VIDEO,
+};
+
+struct media_track;
+
+int  mediatrack_start_audio(struct media_track *media,
+			    struct list *ausrcl, struct list *aufiltl);
+int  mediatrack_start_video(struct media_track *media);
+struct stream *media_get_stream(const struct media_track *media);
+struct audio *media_get_audio(const struct media_track *media);
+struct video *media_get_video(const struct media_track *media);
+enum media_kind mediatrack_kind(const struct media_track *media);
+const char *media_kind_name(enum media_kind kind);
+
+
+/*
+ * WebRTC RTCPeerConnection
+ *
+ * https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection
+ */
+
+
+/* RTCPeerConnection.signalingState */
+enum signaling_st {
+	SS_STABLE,
+	SS_HAVE_LOCAL_OFFER,
+	SS_HAVE_REMOTE_OFFER
+};
+
+
+/* RTCConfiguration */
+struct rtc_configuration {
+	struct stun_uri *ice_server;
+	const char *stun_user;
+	const char *credential;
+	bool offerer;
+};
+
+struct peer_connection;
+
+typedef void (peerconnection_gather_h)(void *arg);
+typedef void (peerconnection_estab_h)(struct media_track *media,
+				      void *arg);
+typedef void (peerconnection_close_h)(int err, void *arg);
+
+int  peerconnection_new(struct peer_connection **pcp,
+		        const struct rtc_configuration *config,
+		        const struct mnat *mnat, const struct menc *menc,
+		        peerconnection_gather_h *gatherh,
+		        peerconnection_estab_h,
+		        peerconnection_close_h *closeh, void *arg);
+int peerconnection_add_audio_track(struct peer_connection *pc,
+				   const struct config *cfg,
+				   struct list *aucodecl, enum sdp_dir dir);
+int peerconnection_add_video_track(struct peer_connection *pc,
+				   const struct config *cfg,
+				   struct list *vidcodecl, enum sdp_dir dir);
+int  peerconnection_set_remote_descr(struct peer_connection *pc,
+				    const struct session_description *sd);
+int  peerconnection_create_offer(struct peer_connection *sess,
+				struct mbuf **mb);
+int  peerconnection_create_answer(struct peer_connection *sess,
+				 struct mbuf **mb);
+int  peerconnection_start_ice(struct peer_connection *pc);
+void peerconnection_close(struct peer_connection *pc);
+void peerconnection_add_ice_candidate(struct peer_connection *pc,
+				      const char *cand, const char *mid);
+enum signaling_st peerconnection_signaling(const struct peer_connection *pc);
+
+
+/*
+ * HTTP functions
+ */
+
+const char *http_extension_to_mimetype(const char *ext);
+int http_reply_json(struct http_conn *conn, const char *sessid,
+		    const struct odict *od);
 
 
 #ifdef __cplusplus

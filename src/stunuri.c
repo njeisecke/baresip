@@ -1,7 +1,7 @@
 /**
  * @file stunuri.c URI Scheme for STUN/TURN Protocol
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -45,11 +45,17 @@ static void destructor(void *arg)
 }
 
 
+/**
+ * Decode a STUN uri from a string
+ *
+ * @param sup Pointer to allocated STUN uri
+ * @param pl  Pointer-length string
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int stunuri_decode(struct stun_uri **sup, const struct pl *pl)
 {
-	struct stun_uri *su;
 	struct uri uri;
-	enum stun_scheme scheme;
 	int err;
 
 	if (!sup || !pl)
@@ -61,17 +67,59 @@ int stunuri_decode(struct stun_uri **sup, const struct pl *pl)
 		return err;
 	}
 
-	if (0 == pl_strcasecmp(&uri.scheme, "stun"))
+	err = stunuri_decode_uri(sup, &uri);
+
+	return err;
+}
+
+/**
+ * Decode a STUN uri from URI object
+ *
+ * @param sup Pointer to allocated STUN uri
+ * @param uri URI object
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int stunuri_decode_uri(struct stun_uri **sup, const struct uri *uri)
+{
+	struct stun_uri *su;
+	enum stun_scheme scheme;
+	struct pl tp;
+	int proto = IPPROTO_UDP;
+	int err;
+
+	if (!sup || !uri)
+		return EINVAL;
+
+	if (0 == pl_strcasecmp(&uri->scheme, "stun"))
 		scheme = STUN_SCHEME_STUN;
-	else if (0 == pl_strcasecmp(&uri.scheme, "stuns"))
+	else if (0 == pl_strcasecmp(&uri->scheme, "stuns"))
 		scheme = STUN_SCHEME_STUNS;
-	else if (0 == pl_strcasecmp(&uri.scheme, "turn"))
+	else if (0 == pl_strcasecmp(&uri->scheme, "turn"))
 		scheme = STUN_SCHEME_TURN;
-	else if (0 == pl_strcasecmp(&uri.scheme, "turns"))
+	else if (0 == pl_strcasecmp(&uri->scheme, "turns"))
 		scheme = STUN_SCHEME_TURNS;
 	else {
-		warning("stunuri: scheme not supported (%r)\n", &uri.scheme);
+		warning("stunuri: scheme not supported (%r)\n", &uri->scheme);
 		return ENOTSUP;
+	}
+
+	if (0 == re_regex(uri->headers.p, uri->headers.l,
+		"transport=[a-z]+", &tp)) {
+
+		if (0 == pl_strcasecmp(&tp, "udp"))
+			proto = IPPROTO_UDP;
+		else if (0 == pl_strcasecmp(&tp, "tcp"))
+			proto = IPPROTO_TCP;
+		else {
+			warning("stunuri: unsupported transport '%r'\n", &tp);
+			return EPROTONOSUPPORT;
+		}
+	}
+
+	if (pl_isset(&uri->password)) {
+		warning("The \"user:password\" format in the stunserver"
+			" userinfo field is deprecated.\n");
 	}
 
 	su = mem_zalloc(sizeof(*su), destructor);
@@ -79,8 +127,9 @@ int stunuri_decode(struct stun_uri **sup, const struct pl *pl)
 		return ENOMEM;
 
 	su->scheme = scheme;
-	err = pl_strdup(&su->host, &uri.host);
-	su->port = uri.port;
+	err = pl_strdup(&su->host, &uri->host);
+	su->port = uri->port;
+	su->proto = proto;
 
 	if (err)
 		mem_deref(su);
@@ -91,6 +140,14 @@ int stunuri_decode(struct stun_uri **sup, const struct pl *pl)
 }
 
 
+/**
+ * Set the hostname on a STUN uri
+ *
+ * @param su   STUN uri
+ * @param host Hostname to set
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int stunuri_set_host(struct stun_uri *su, const char *host)
 {
 	if (!su || !host)
@@ -102,6 +159,14 @@ int stunuri_set_host(struct stun_uri *su, const char *host)
 }
 
 
+/**
+ * Set the port number on a STUN uri
+ *
+ * @param su   STUN uri
+ * @param port Port number to set
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int stunuri_set_port(struct stun_uri *su, uint16_t port)
 {
 	if (!su)
@@ -113,6 +178,14 @@ int stunuri_set_port(struct stun_uri *su, uint16_t port)
 }
 
 
+/**
+ * Print a STUN uri
+ *
+ * @param pf Print function
+ * @param su STUN uri
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int stunuri_print(struct re_printf *pf, const struct stun_uri *su)
 {
 	int err = 0;
@@ -123,11 +196,19 @@ int stunuri_print(struct re_printf *pf, const struct stun_uri *su)
 	err |= re_hprintf(pf, "scheme=%s", stunuri_scheme_name(su->scheme));
 	err |= re_hprintf(pf, " host='%s'", su->host);
 	err |= re_hprintf(pf, " port=%u", su->port);
+	err |= re_hprintf(pf, " proto=%s", net_proto2name(su->proto));
 
 	return err;
 }
 
 
+/**
+ * Get the name of the STUN scheme
+ *
+ * @param scheme STUN scheme
+ *
+ * @return String with STUN scheme
+ */
 const char *stunuri_scheme_name(enum stun_scheme scheme)
 {
 	switch (scheme) {

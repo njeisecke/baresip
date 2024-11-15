@@ -1,7 +1,7 @@
 /**
  * @file opensles/recorder.c  OpenSLES audio driver -- recording
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -17,13 +17,12 @@
 
 
 struct ausrc_st {
-	const struct ausrc *as;      /* inheritance */
-
 	int16_t *sampv[N_REC_QUEUE_BUFFERS];
 	size_t   sampc;
 	uint8_t  bufferId;
 	ausrc_read_h *rh;
 	void *arg;
+	struct ausrc_prm prm;
 
 	SLObjectItf recObject;
 	SLRecordItf recRecord;
@@ -55,10 +54,14 @@ static void ausrc_destructor(void *arg)
 static void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
 {
 	struct ausrc_st *st = context;
-
+	struct auframe af;
 	(void)bq;
 
-	st->rh(st->sampv[st->bufferId], st->sampc, st->arg);
+	auframe_init(&af, AUFMT_S16LE, st->sampv[st->bufferId], st->sampc,
+		     st->prm.srate, st->prm.ch);
+	af.timestamp = tmr_jiffies_usec();
+
+	st->rh(&af, st->arg);
 
 	st->bufferId = ( st->bufferId + 1 ) % N_REC_QUEUE_BUFFERS;
 
@@ -66,7 +69,7 @@ static void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
 
 	(*st->recBufferQueue)->Enqueue(st->recBufferQueue,
 				       st->sampv[st->bufferId],
-				       st->sampc * 2);
+				       (unsigned int)(st->sampc * 2));
 }
 
 
@@ -140,7 +143,7 @@ static int startRecording(struct ausrc_st *st)
 	st->bufferId = 0;
 	r = (*st->recBufferQueue)->Enqueue(st->recBufferQueue,
 					   st->sampv[st->bufferId],
-					   st->sampc * 2);
+					   (unsigned int)(st->sampc * 2));
 	if (SL_RESULT_SUCCESS != r)
 		return ENODEV;
 
@@ -154,13 +157,11 @@ static int startRecording(struct ausrc_st *st)
 
 
 int opensles_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
-			    struct media_ctx **ctx,
 			    struct ausrc_prm *prm, const char *device,
 			    ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
 	struct ausrc_st *st;
 	int err;
-	(void)ctx;
 	(void)device;
 	(void)errh;
 
@@ -180,9 +181,9 @@ int opensles_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (!st)
 		return ENOMEM;
 
-	st->as  = as;
 	st->rh  = rh;
 	st->arg = arg;
+	st->prm = *prm;
 
 	st->sampc = prm->srate * prm->ch * PTIME / 1000;
 	st->bufferId   = 0;

@@ -1,11 +1,10 @@
 /**
  * @file audiounit/player.c  AudioUnit output player
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
-#include <pthread.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -13,10 +12,10 @@
 
 
 struct auplay_st {
-	const struct auplay *ap;      /* inheritance */
 	struct audiosess_st *sess;
+	struct auplay_prm prm;
 	AudioUnit au;
-	pthread_mutex_t mutex;
+	mtx_t mutex;
 	uint32_t sampsz;
 	auplay_write_h *wh;
 	void *arg;
@@ -27,9 +26,9 @@ static void auplay_destructor(void *arg)
 {
 	struct auplay_st *st = arg;
 
-	pthread_mutex_lock(&st->mutex);
+	mtx_lock(&st->mutex);
 	st->wh = NULL;
-	pthread_mutex_unlock(&st->mutex);
+	mtx_unlock(&st->mutex);
 
 	AudioOutputUnitStop(st->au);
 	AudioUnitUninitialize(st->au);
@@ -37,7 +36,7 @@ static void auplay_destructor(void *arg)
 
 	mem_deref(st->sess);
 
-	pthread_mutex_destroy(&st->mutex);
+	mtx_destroy(&st->mutex);
 }
 
 
@@ -58,10 +57,10 @@ static OSStatus output_callback(void *inRefCon,
 	(void)inBusNumber;
 	(void)inNumberFrames;
 
-	pthread_mutex_lock(&st->mutex);
+	mtx_lock(&st->mutex);
 	wh  = st->wh;
 	arg = st->arg;
-	pthread_mutex_unlock(&st->mutex);
+	mtx_unlock(&st->mutex);
 
 	if (!wh)
 		return 0;
@@ -69,8 +68,18 @@ static OSStatus output_callback(void *inRefCon,
 	for (i = 0; i < ioData->mNumberBuffers; ++i) {
 
 		AudioBuffer *ab = &ioData->mBuffers[i];
+		struct auframe af;
+		uint64_t ts;
 
-		wh(ab->mData, ab->mDataByteSize/st->sampsz, arg);
+		auframe_init(&af, st->prm.fmt, ab->mData,
+			     ab->mDataByteSize / st->sampsz, st->prm.srate,
+			     st->prm.ch);
+
+		ts = AUDIO_TIMEBASE * inTimeStamp->mSampleTime / st->prm.srate;
+
+		af.timestamp = ts;
+
+		wh(&af, arg);
 	}
 
 	return 0;
@@ -111,9 +120,10 @@ int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
+
+	st->prm = *prm;
 
 	st->sampsz = (uint32_t)aufmt_sample_size(prm->fmt);
 	if (!st->sampsz) {
@@ -121,9 +131,11 @@ int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 		goto out;
 	}
 
-	err = pthread_mutex_init(&st->mutex, NULL);
-	if (err)
+	err = mtx_init(&st->mutex, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
 		goto out;
+	}
 
 	err = audiosess_alloc(&st->sess, interrupt_handler, st);
 	if (err)

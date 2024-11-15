@@ -1,7 +1,7 @@
 /**
  * @file mock/mock_vidisp.c Mock video display
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -14,7 +14,6 @@
 
 
 struct vidisp_st {
-	const struct vidisp *vd;  /* inheritance */
 	unsigned n_frame;
 };
 
@@ -49,8 +48,6 @@ static int mock_disp_alloc(struct vidisp_st **stp, const struct vidisp *vd,
 	if (!st)
 		return ENOMEM;
 
-	st->vd = vd;
-
 	*stp = st;
 
 	return 0;
@@ -61,7 +58,6 @@ static int mock_display(struct vidisp_st *st, const char *title,
 			const struct vidframe *frame, uint64_t timestamp)
 {
 	unsigned width, height;
-	(void)title;
 	(void)timestamp;
 
 	if (!st || !frame)
@@ -91,7 +87,7 @@ static int mock_display(struct vidisp_st *st, const char *title,
 		info("mock_vidisp: got %u frames\n", st->n_frame);
 
 		if (mock.disph)
-			mock.disph(frame, timestamp, mock.arg);
+			mock.disph(frame, timestamp, title, mock.arg);
 	}
 
 	return 0;

@@ -1,7 +1,7 @@
 /**
  * @file audiounit.c  AudioUnit sound driver
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -134,38 +134,11 @@ uint32_t audiounit_aufmt_to_formatflags(enum aufmt fmt)
 }
 
 
-#if TARGET_OS_IPHONE
-static void interruptionListener(void *data, UInt32 inInterruptionState)
-{
-	(void)data;
-
-	if (inInterruptionState == kAudioSessionBeginInterruption) {
-		info("audiounit: interrupt Begin\n");
-		audiosess_interrupt(true);
-	}
-	else if (inInterruptionState == kAudioSessionEndInterruption) {
-		info("audiounit: interrupt End\n");
-		audiosess_interrupt(false);
-	}
-}
-#endif
-
-
 static int module_init(void)
 {
 	AudioComponentDescription desc;
 	CFStringRef name = NULL;
 	int err;
-
-#if TARGET_OS_IPHONE
-	OSStatus ret;
-
-	ret = AudioSessionInitialize(NULL, NULL, interruptionListener, 0);
-	if (ret && ret != kAudioSessionAlreadyInitialized) {
-		warning("audiounit: AudioSessionInitialize: %d\n", ret);
-		return ENODEV;
-	}
-#endif
 
 	desc.componentType = kAudioUnitType_Output;
 #if TARGET_OS_IPHONE

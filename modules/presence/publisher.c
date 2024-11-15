@@ -1,7 +1,7 @@
 /**
  * @file publisher.c Presence Publisher (RFC 3903)
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  * Copyright (C) 2014 Juha Heinanen
  */
 
@@ -30,6 +30,7 @@ static int publish(struct publisher *pub);
 static void response_handler(int err, const struct sip_msg *msg, void *arg)
 {
 	struct publisher *pub = arg;
+	const struct account *acc = ua_account(pub->ua);
 	const struct sip_hdr *etag_hdr;
 
 	if (err)
@@ -54,7 +55,7 @@ static void response_handler(int err, const struct sip_msg *msg, void *arg)
 		}
 		else {
 			warning("%s: publisher got 200 OK without etag\n",
-				ua_aor(pub->ua));
+				account_aor(acc));
 		}
 	}
 	else if (msg->scode == 412) {
@@ -67,7 +68,7 @@ static void response_handler(int err, const struct sip_msg *msg, void *arg)
 	}
 	else {
 		warning("%s: publisher got error response %u %r\n",
-			ua_aor(pub->ua), msg->scode, &msg->reason);
+			account_aor(acc), msg->scode, &msg->reason);
 	}
 
 	return;
@@ -99,7 +100,7 @@ static int print_etag_header(struct re_printf *pf, const char *etag)
 static int publish(struct publisher *pub)
 {
 	int err;
-	const char *aor = ua_aor(pub->ua);
+	const char *aor = account_aor(ua_account(pub->ua));
 	struct mbuf *mb;
 
 	mb = mbuf_alloc(1024);
@@ -232,14 +233,9 @@ static int publisher_alloc(struct ua *ua)
 }
 
 
-static void pub_ua_event_handler(struct ua *ua,
-				 enum ua_event ev,
-				 struct call *call,
-				 const char *prm,
-				 void *arg )
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
-	(void)call;
-	(void)prm;
+	struct ua *ua = bevent_get_ua(event);
 	(void)arg;
 
 	if (account_pubint(ua_account(ua)) == 0)
@@ -259,7 +255,7 @@ int publisher_init(void)
 	struct le *le;
 	int err = 0;
 
-	err = uag_event_register(pub_ua_event_handler, NULL);
+	err = bevent_register(event_handler, NULL);
 	if (err)
 		return err;
 
@@ -285,7 +281,7 @@ void publisher_close(void)
 {
 	struct le *le;
 
-	uag_event_unregister(pub_ua_event_handler);
+	bevent_unregister(event_handler);
 
 	for (le = list_head(&publ); le; le = le->next) {
 

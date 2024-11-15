@@ -1,0 +1,26 @@
+name: lint
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ccheck
+        run: |
+          test/ccheck.py -e baresipbus.*
+
+      - name: CMakeLint
+        run: |
+          pip install cmakelint
+          find . -name "CMakeLists.txt" -exec ~/.local/bin/cmakelint {} +
+          find . -name "*.cmake" -exec ~/.local/bin/cmakelint {} +
+
+      - name: pylint
+        run: |
+          sudo apt-get update && sudo apt-get install -qy pylint
+          pylint tools/fritzbox2baresip

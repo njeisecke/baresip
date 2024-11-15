@@ -1,7 +1,7 @@
 /**
  * @file vidbridge/src.c Video bridge -- source
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -22,16 +22,18 @@ static void destructor(void *arg)
 
 
 int vidbridge_src_alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
-			struct media_ctx **ctx, struct vidsrc_prm *prm,
+			struct vidsrc_prm *prm,
 			const struct vidsz *size, const char *fmt,
 			const char *dev, vidsrc_frame_h *frameh,
+			vidsrc_packet_h *packeth,
 			vidsrc_error_h *errorh, void *arg)
 {
 	struct vidsrc_st *st;
 	int err;
-	(void)ctx;
 	(void)fmt;
+	(void)packeth;
 	(void)errorh;
+	(void)vs;
 
 	if (!stp || !prm || !size || !frameh)
 		return EINVAL;
@@ -40,7 +42,6 @@ int vidbridge_src_alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 	if (!st)
 		return ENOMEM;
 
-	st->vs     = vs;
 	st->frameh = frameh;
 	st->arg    = arg;
 	st->fps    = prm->fps;

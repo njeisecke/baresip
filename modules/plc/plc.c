@@ -1,7 +1,7 @@
 /**
  * @file plc.c  PLC -- Packet Loss Concealment
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #define SPANDSP_EXPOSE_INTERNAL_STRUCTURES
@@ -9,6 +9,8 @@
 #include <spandsp.h>
 #include <re.h>
 #include <rem_au.h>
+#include <rem_aulevel.h>
+#include <rem_auframe.h>
 #include <baresip.h>
 
 
@@ -86,19 +88,22 @@ static int update(struct aufilt_dec_st **stp, void **ctx,
  *
  * NOTE: sampc == 0 , means Packet loss
  */
-static int decode(struct aufilt_dec_st *st, void *sampv, size_t *sampc)
+static int decode(struct aufilt_dec_st *st, struct auframe *af)
 {
 	struct plc_st *plc = (struct plc_st *)st;
 
-	if (!st || !sampv || !sampc)
+	if (!st || !af)
 		return EINVAL;
 
-	if (*sampc) {
-		plc_rx(&plc->plc, sampv, (int)*sampc);
-		plc->sampc = *sampc;
+	if (af->fmt != AUFMT_S16LE)
+		return ENOTSUP;
+
+	if (af->sampc) {
+		plc_rx(&plc->plc, af->sampv, (int)af->sampc);
+		plc->sampc = af->sampc;
 	}
 	else if (plc->sampc)
-		*sampc = plc_fillin(&plc->plc, sampv, (int)plc->sampc);
+		af->sampc = plc_fillin(&plc->plc, af->sampv, (int)plc->sampc);
 
 	return 0;
 }

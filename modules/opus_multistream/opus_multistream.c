@@ -1,7 +1,7 @@
 /**
  * @file opus_multistream.c Opus Multistream Audio Codec
  *
- * Copyright (C) 2019 Creytiv.com
+ * Copyright (C) 2019 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -46,8 +46,8 @@ static char fmtp_mirror[256];
 uint32_t opus_ms_complexity = 10;
 opus_int32 opus_ms_application = OPUS_APPLICATION_AUDIO;
 
-uint32_t opus_ms_channels = 2;
-uint32_t opus_ms_streams = 2;
+static uint32_t opus_ms_channels = 6;
+uint32_t opus_ms_streams = 4;
 uint32_t opus_ms_c_streams = 2;
 
 
@@ -71,11 +71,11 @@ static int opus_multistream_fmtp_enc(struct mbuf *mb,
 
 
 static struct aucodec opus_multistream = {
-	.name      = "opus_multistream",    /* NOTE: not standard */
+	.name      = "multiopus",           /* NOTE: not standard */
 	.srate     = 48000,
 	.crate     = 48000,
-	.ch        = 2,                     /* NOTE: configurable */
-	.pch       = 2,
+	.ch        = 6,                     /* NOTE: configurable */
+	.pch       = 6,
 	.fmtp      = fmtp,
 	.encupdh   = opus_multistream_encode_update,
 	.ench      = opus_multistream_encode_frm,
@@ -152,8 +152,6 @@ static int module_init(void)
 				";usedtx=%d", b);
 		if (n <= 0)
 			return ENOMEM;
-
-		p += n;
 	}
 
 	(void)conf_get_bool(conf, "opus_mirror", &opus_mirror);

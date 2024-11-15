@@ -1,7 +1,7 @@
 /**
  * @file sipreq.c  SIP Authenticated Request
  *
- * Copyright (C) 2011 Creytiv.com
+ * Copyright (C) 2011 Alfred E. Heggestad
  */
 #include <re.h>
 #include <baresip.h>
@@ -143,7 +143,8 @@ int sip_req_send(struct ua *ua, const char *method, const char *uri,
 	if (err)
 		goto out;
 
-	err = sip_dialog_alloc(&sr->dlg, uri, uri, NULL, ua_aor(ua),
+	err = sip_dialog_alloc(&sr->dlg, uri, uri, NULL,
+			       account_aor(ua_account(ua)),
 			       routev[0] ? routev : NULL,
 			       routev[0] ? 1 : 0);
 	if (err)

@@ -1,10 +1,9 @@
 /**
  * @file pcp.c Port Control Protocol for Media NAT-traversal
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
-#include <rew.h>
 #include <baresip.h>
 #include "pcp.h"
 
@@ -169,7 +168,7 @@ static void pcp_resp_handler(int err, struct pcp_msg *msg, void *arg)
 
 static int session_alloc(struct mnat_sess **sessp,
 			 const struct mnat *mnat, struct dnsc *dnsc,
-			 int af, const char *srv, uint16_t port,
+			 int af, const struct stun_uri *srv,
 			 const char *user, const char *pass,
 			 struct sdp_session *ss, bool offerer,
 			 mnat_estab_h *estabh, void *arg)
@@ -178,7 +177,6 @@ static int session_alloc(struct mnat_sess **sessp,
 	int err = 0;
 	(void)mnat;
 	(void)af;
-	(void)port;
 	(void)user;
 	(void)pass;
 	(void)ss;
@@ -337,7 +335,7 @@ static int module_init(void)
 			return err;
 	}
 	else {
-		err = net_default_gateway_get(net_af(baresip_network()),
+		err = net_default_gateway_get(AF_INET,
 					      &pcp_srv);
 		if (err)
 			return err;

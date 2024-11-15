@@ -1,10 +1,11 @@
 /**
  * @file mock/dnssrv.c Mock DNS server
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
+#include <rem.h>
 #include "../test.h"
 
 
@@ -71,7 +72,6 @@ static void decode_dns_query(struct dns_server *srv,
 	}
 
 	if (mbuf_get_left(mb) < 4) {
-		err = EBADMSG;
 		DEBUG_WARNING("unable to decode query type/class\n");
 		goto out;
 	}
@@ -196,6 +196,40 @@ int dns_server_add_a(struct dns_server *srv, const char *name, uint32_t addr)
 	rr->rdlen = 0;
 
 	rr->rdata.a.addr = addr;
+
+	list_append(&srv->rrl, &rr->le, rr);
+
+ out:
+	if (err)
+		mem_deref(rr);
+
+	return err;
+}
+
+
+int dns_server_add_aaaa(struct dns_server *srv, const char *name,
+			const uint8_t *addr)
+{
+	struct dnsrr *rr;
+	int err;
+
+	if (!srv || !name)
+		return EINVAL;
+
+	rr = dns_rr_alloc();
+	if (!rr)
+		return ENOMEM;
+
+	err = str_dup(&rr->name, name);
+	if (err)
+		goto out;
+
+	rr->type = DNS_TYPE_AAAA;
+	rr->dnsclass = DNS_CLASS_IN;
+	rr->ttl = 3600;
+	rr->rdlen = 0;
+
+	memcpy(rr->rdata.aaaa.addr, addr, 16);
 
 	list_append(&srv->rrl, &rr->le, rr);
 

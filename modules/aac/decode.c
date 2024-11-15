@@ -1,7 +1,7 @@
 /**
  * @file aac/decode.c MPEG-4 AAC Decoder
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  * Copyright (C) 2019 Hessischer Rundfunk
  */
 
@@ -54,7 +54,7 @@ static int hdr_decode(struct au_hdr *au_data, const uint8_t *p,
 
 	bits = ntohs(*(uint16_t *)(void *)&p[2]);
 
-	au_data->size = bits >> ((sizeof(uint16_t) * 8) - SIZELENGTH);
+	au_data->size = bits >> ((sizeof(uint16_t) * 8) - AAC_SIZELENGTH);
 
 	if (au_data->size == 0) {
 		warning("aac: decode: invalid access unit size (zero)\n",
@@ -82,12 +82,13 @@ int aac_decode_update(struct audec_state **adsp, const struct aucodec *ac,
 {
 	struct audec_state *ads;
 	AAC_DECODER_ERROR error;
-	int err = 0;
-	(void)fmtp;
-
 	struct pl config;
+	UCHAR *conf;
+	UINT length;
 	char config_str[64];
 	uint8_t config_bin[32];
+	int err = 0;
+	(void)fmtp;
 
 	if (!adsp || !ac || !ac->ch)
 		return EINVAL;
@@ -122,8 +123,8 @@ int aac_decode_update(struct audec_state **adsp, const struct aucodec *ac,
 	if (err)
 		goto out;
 
-	UCHAR *conf = config_bin;
-	const UINT length = (UINT)strlen(config_str)/2;
+	conf = config_bin;
+	length = (UINT)strlen(config_str)/2;
 
 	error = aacDecoder_ConfigRaw(ads->dec, &conf, &length);
 	if (error != AAC_DEC_OK) {
@@ -231,7 +232,6 @@ int aac_decode_frm(struct audec_state *ads, int fmt, void *sampv,
 		}
 
 		nsamp += (info->frameSize * info->numChannels);
-		size -= (info->frameSize * info->numChannels);
 
 		pos += bufferSize - valid;
 		pBuffer += bufferSize - valid;

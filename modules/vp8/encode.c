@@ -1,7 +1,7 @@
 /**
  * @file vp8/encode.c VP8 Encode
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <string.h>
@@ -15,6 +15,7 @@
 
 enum {
 	HDR_SIZE = 4,
+	KEYFRAME_INTERVAL = 10  /* Keyframes per second */
 };
 
 
@@ -27,7 +28,7 @@ struct videnc_state {
 	bool ctxup;
 	uint16_t picid;
 	videnc_packet_h *pkth;
-	void *arg;
+	const struct video *vid;
 };
 
 
@@ -42,7 +43,7 @@ static void destructor(void *arg)
 
 int vp8_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		      struct videnc_param *prm, const char *fmtp,
-		      videnc_packet_h *pkth, void *arg)
+		      videnc_packet_h *pkth, const struct video *vid)
 {
 	const struct vp8_vidcodec *vp8 = (struct vp8_vidcodec *)vc;
 	struct videnc_state *ves;
@@ -77,7 +78,7 @@ int vp8_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 	ves->pktsize = prm->pktsize;
 	ves->fps     = prm->fps;
 	ves->pkth    = pkth;
-	ves->arg     = arg;
+	ves->vid     = vid;
 
 	max_fs = vp8_max_fs(fmtp);
 	if (max_fs > 0)
@@ -92,11 +93,17 @@ static int open_encoder(struct videnc_state *ves, const struct vidsz *size)
 	vpx_codec_enc_cfg_t cfg;
 	vpx_codec_err_t res;
 	vpx_codec_flags_t flags = 0;
+	uint32_t threads = 1;
+	int32_t cpuused = 16;
 
 	res = vpx_codec_enc_config_default(&vpx_codec_vp8_cx_algo, &cfg, 0);
 	if (res)
 		return EPROTO;
 
+	conf_get_u32(conf_cur(), "vp8_enc_threads", &threads);
+	conf_get_i32(conf_cur(), "vp8_enc_cpuused", &cpuused);
+
+	cfg.g_threads = threads;
 	cfg.g_profile = 2;
 	cfg.g_w = size->w;
 	cfg.g_h = size->h;
@@ -105,11 +112,16 @@ static int open_encoder(struct videnc_state *ves, const struct vidsz *size)
 #ifdef VPX_ERROR_RESILIENT_DEFAULT
 	cfg.g_error_resilient = VPX_ERROR_RESILIENT_DEFAULT;
 #endif
-	cfg.g_pass            = VPX_RC_ONE_PASS;
-	cfg.g_lag_in_frames   = 0;
-	cfg.rc_end_usage      = VPX_VBR;
-	cfg.rc_target_bitrate = ves->bitrate;
-	cfg.kf_mode           = VPX_KF_AUTO;
+	cfg.g_pass		= VPX_RC_ONE_PASS;
+	cfg.g_lag_in_frames	= 0;
+	cfg.rc_end_usage	= VPX_CBR;
+	cfg.rc_target_bitrate	= ves->bitrate / 1000; /* kbps */
+	cfg.rc_overshoot_pct	= 15;
+	cfg.rc_undershoot_pct	= 100;
+	cfg.rc_dropframe_thresh = 0;
+	cfg.kf_mode		= VPX_KF_AUTO;
+	cfg.kf_min_dist		= ves->fps * KEYFRAME_INTERVAL;
+	cfg.kf_max_dist		= ves->fps * KEYFRAME_INTERVAL;
 
 	if (ves->ctxup) {
 		debug("vp8: re-opening encoder\n");
@@ -130,7 +142,7 @@ static int open_encoder(struct videnc_state *ves, const struct vidsz *size)
 
 	ves->ctxup = true;
 
-	res = vpx_codec_control(&ves->ctx, VP8E_SET_CPUUSED, 16);
+	res = vpx_codec_control(&ves->ctx, VP8E_SET_CPUUSED, cpuused);
 	if (res) {
 		warning("vp8: codec ctrl: %s\n", vpx_codec_err_to_string(res));
 	}
@@ -157,7 +169,7 @@ static inline void hdr_encode(uint8_t hdr[HDR_SIZE], bool noref, bool start,
 static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 			    size_t maxlen, bool noref, uint8_t partid,
 			    uint16_t picid, uint64_t rtp_ts,
-			    videnc_packet_h *pkth, void *arg)
+			    videnc_packet_h *pkth, const struct video *vid)
 {
 	uint8_t hdr[HDR_SIZE];
 	bool start = true;
@@ -170,7 +182,7 @@ static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 		hdr_encode(hdr, noref, start, partid, picid);
 
 		err |= pkth(false, rtp_ts, hdr, sizeof(hdr), buf, maxlen,
-			    arg);
+			    vid);
 
 		buf  += maxlen;
 		len  -= maxlen;
@@ -179,7 +191,7 @@ static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 
 	hdr_encode(hdr, noref, start, partid, picid);
 
-	err |= pkth(marker, rtp_ts, hdr, sizeof(hdr), buf, len, arg);
+	err |= pkth(marker, rtp_ts, hdr, sizeof(hdr), buf, len, vid);
 
 	return err;
 }
@@ -265,10 +277,72 @@ int vp8_encode(struct videnc_state *ves, bool update,
 				pkt->data.frame.sz,
 				ves->pktsize, !keyframe, partid, ves->picid,
 				ts,
-				ves->pkth, ves->arg);
+				ves->pkth, ves->vid);
 		if (err)
 			return err;
 	}
+
+	return 0;
+}
+
+
+static int peek_vp8_bitstream(bool *key_frame,
+			      const uint8_t *buf, size_t size)
+{
+	if (size < 3)
+		return EBADMSG;
+
+	uint8_t frame_type = buf[0] & 1;
+	uint8_t profile    = (buf[0] >> 1) & 7;
+
+	if (profile > 3) {
+		warning("vp8: Invalid profile %u.\n", profile);
+		return EPROTO;
+	}
+
+	if (frame_type == 0) {
+
+		if (size < 10)
+			return EBADMSG;
+
+		const uint8_t *c = buf + 3;
+
+		if (c[0] != 0x9d || c[1] != 0x01 || c[2] != 0x2a) {
+
+			warning("vp8: Invalid sync code %w.\n", c, 3);
+			return EPROTO;
+		}
+	}
+
+	*key_frame = frame_type == 0;
+
+	return 0;
+}
+
+
+int vp8_encode_packetize(struct videnc_state *ves,
+			 const struct vidpacket *pkt)
+{
+	bool key_frame = false;
+	uint64_t rtp_ts;
+	int err;
+
+	if (!ves || !pkt)
+		return EINVAL;
+
+	++ves->picid;
+
+	err = peek_vp8_bitstream(&key_frame, pkt->buf, pkt->size);
+	if (err)
+		return err;
+
+	rtp_ts = video_calc_rtp_timestamp_fix(pkt->timestamp);
+
+	err = packetize(true, pkt->buf, pkt->size,
+			ves->pktsize, !key_frame, 0,
+			ves->picid, rtp_ts, ves->pkth, ves->vid);
+	if (err)
+		return err;
 
 	return 0;
 }

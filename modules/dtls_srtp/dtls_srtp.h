@@ -1,7 +1,7 @@
 /**
  * @file dtls_srtp.h DTLS-SRTP Internal api
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 
@@ -17,7 +17,7 @@ struct comp {
 	struct srtp_stream *tx;
 	struct srtp_stream *rx;
 	struct udp_helper *uh_srtp;
-	void *app_sock;
+	struct udp_sock *app_sock;
 	bool negotiated;
 	bool is_rtp;
 };

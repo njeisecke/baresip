@@ -1,7 +1,7 @@
 /**
  * @file av1.c AV1 Video Codec
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -15,15 +15,18 @@
  * The AV1 video codec (Experimental)
  *
  * Reference: http://aomedia.org/
+ *
+ * https://aomediacodec.github.io/av1-rtp-spec/
  */
 
 
 static struct vidcodec av1 = {
 	.name      = "AV1",
 	.encupdh   = av1_encode_update,
-	.ench      = av1_encode,
+	.ench      = av1_encode_packet,
 	.decupdh   = av1_decode_update,
 	.dech      = av1_decode,
+	.packetizeh = av1_encode_packetize,
 };
 
 

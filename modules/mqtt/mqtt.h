@@ -1,7 +1,7 @@
 /**
  * @file mqtt.h Message Queue Telemetry Transport (MQTT) client -- interface
  *
- * Copyright (C) 2017 Creytiv.com
+ * Copyright (C) 2017 Alfred E. Heggestad
  */
 
 
@@ -11,7 +11,8 @@ struct mqtt {
 	char *subtopic;		/* Topic for subscribe */
 	char *basetopic;	/* Base topic */
 	struct tmr tmr;
-	int fd;
+	re_sock_t fd;
+	struct re_fhs *fhs;
 };
 
 

@@ -1,7 +1,7 @@
 /**
  * @file vp9/decode.c VP9 Decode
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 
 #include <string.h>
@@ -68,13 +68,14 @@ static void destructor(void *arg)
 
 
 int vp9_decode_update(struct viddec_state **vdsp, const struct vidcodec *vc,
-		       const char *fmtp)
+		      const char *fmtp, const struct video *vid)
 {
 	struct viddec_state *vds;
 	vpx_codec_err_t res;
 	int err = 0;
 	(void)vc;
 	(void)fmtp;
+	(void)vid;
 
 	if (!vdsp)
 		return EINVAL;
@@ -94,7 +95,7 @@ int vp9_decode_update(struct viddec_state **vdsp, const struct vidcodec *vc,
 		goto out;
 	}
 
-	res = vpx_codec_dec_init(&vds->ctx, &vpx_codec_vp9_dx_algo, NULL, 0);
+	res = vpx_codec_dec_init(&vds->ctx, vpx_codec_vp9_dx(), NULL, 0);
 	if (res) {
 		err = ENOMEM;
 		goto out;
@@ -218,7 +219,7 @@ static inline int hdr_decode(struct hdr *hdr, struct mbuf *mb)
 		}
 	}
 
-	if (hdr->p) {
+	if (hdr->f && hdr->p) {
 		uint8_t p_diff;
 
 		if (mbuf_get_left(mb) < 1)
@@ -261,14 +262,8 @@ static inline bool is_keyframe(const struct mbuf *mb)
 }
 
 
-static inline int16_t seq_diff(uint16_t x, uint16_t y)
-{
-	return (int16_t)(y - x);
-}
-
-
 int vp9_decode(struct viddec_state *vds, struct vidframe *frame,
-	       bool *intra, bool marker, uint16_t seq, struct mbuf *mb)
+	       struct viddec_packet *pkt)
 {
 	vpx_codec_iter_t iter = NULL;
 	vpx_codec_err_t res;
@@ -276,10 +271,11 @@ int vp9_decode(struct viddec_state *vds, struct vidframe *frame,
 	struct hdr hdr;
 	int err, i;
 
-	if (!vds || !frame || !intra || !mb)
+	if (!vds || !frame || !pkt || !pkt->mb)
 		return EINVAL;
 
-	*intra = false;
+	pkt->intra = false;
+	struct mbuf *mb = pkt->mb;
 
 	vds->n_bytes += mbuf_get_left(mb);
 
@@ -288,14 +284,16 @@ int vp9_decode(struct viddec_state *vds, struct vidframe *frame,
 		return err;
 
 #if 0
-	debug("vp9: [%c] header: i=%u start=%u end=%u picid=%u \n",
-	      marker ? 'M' : ' ', hdr.i, hdr.b, hdr.e, hdr.picid);
+	debug("vp9: [%c] header:"
+	      " i=%u p=%u l=%u f=%u start=%u end=%u picid=%u\n",
+	      marker ? 'M' : ' ',
+	      hdr.i, hdr.p, hdr.l, hdr.f, hdr.b, hdr.e, hdr.picid);
 #endif
 
 	if (hdr.b) {
 
 		if (is_keyframe(mb))
-			*intra = true;
+			pkt->intra = true;
 
 		mbuf_rewind(vds->mb);
 		vds->started = true;
@@ -304,20 +302,20 @@ int vp9_decode(struct viddec_state *vds, struct vidframe *frame,
 		if (!vds->started)
 			return 0;
 
-		if (seq_diff(vds->seq, seq) != 1) {
+		if (rtp_seq_diff(vds->seq, pkt->hdr->seq) != 1) {
 			mbuf_rewind(vds->mb);
 			vds->started = false;
 			return 0;
 		}
 	}
 
-	vds->seq = seq;
+	vds->seq = pkt->hdr->seq;
 
 	err = mbuf_write_mem(vds->mb, mbuf_buf(mb), mbuf_get_left(mb));
 	if (err)
 		goto out;
 
-	if (!marker) {
+	if (!pkt->hdr->m) {
 
 		if (vds->mb->end > DECODE_MAXSZ) {
 			warning("vp9: decode buffer size exceeded\n");

@@ -1,7 +1,7 @@
 /**
  * @file aubridge/src.c Audio bridge -- source
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -20,13 +20,11 @@ static void ausrc_destructor(void *arg)
 
 
 int aubridge_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
-	      struct media_ctx **ctx,
 	      struct ausrc_prm *prm, const char *device,
 	      ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
 	struct ausrc_st *st;
 	int err = 0;
-	(void)ctx;
 	(void)errh;
 
 	if (!stp || !as || !prm)
@@ -36,7 +34,6 @@ int aubridge_src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (!st)
 		return ENOMEM;
 
-	st->as   = as;
 	st->prm  = *prm;
 	st->rh   = rh;
 	st->arg  = arg;

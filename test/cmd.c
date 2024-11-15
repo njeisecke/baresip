@@ -1,7 +1,7 @@
 /**
  * @file test/cmd.c  Baresip selftest -- cmd
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
@@ -59,11 +59,11 @@ int test_cmd(void)
 	err = cmd_init(&commands);
 	ASSERT_EQ(0, err);
 
-	err = cmd_register(commands, cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(commands, cmdv, RE_ARRAY_SIZE(cmdv));
 	ASSERT_EQ(0, err);
 
 	/* it is not possible to register same block twice */
-	ASSERT_EQ(EALREADY, cmd_register(commands, cmdv, ARRAY_SIZE(cmdv)));
+	ASSERT_EQ(EALREADY, cmd_register(commands, cmdv, RE_ARRAY_SIZE(cmdv)));
 
 	/* issue a different command */
 	err = cmd_process(commands, &ctx, 'h', &pf_null, &test);
@@ -127,7 +127,7 @@ int test_cmd_long(void)
 	ASSERT_TRUE(cmd == NULL);
 
 	/* Register and verify command */
-	err = cmd_register(commands, longcmdv, ARRAY_SIZE(longcmdv));
+	err = cmd_register(commands, longcmdv, RE_ARRAY_SIZE(longcmdv));
 	ASSERT_EQ(0, err);
 
 	cmd = cmd_find_long(commands, "test");

@@ -1,7 +1,7 @@
 /**
  * @file test/ua.c  Baresip selftest -- User-Agent (UA)
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
@@ -20,8 +20,12 @@ struct test {
 	int err;
 	unsigned got_register_ok;
 	unsigned n_resp;
+	unsigned n_ev;
 	uint32_t magic;
 	enum sip_transp tp_resp;
+	char uri[256];
+
+	unsigned state;
 };
 
 
@@ -36,7 +40,7 @@ static void test_reset(struct test *t)
 {
 	size_t i;
 
-	for (i=0; i<ARRAY_SIZE(t->srvv); i++)
+	for (i=0; i<RE_ARRAY_SIZE(t->srvv); i++)
 		mem_deref(t->srvv[i]);
 	mem_deref(t->ua);
 
@@ -51,12 +55,15 @@ static void test_abort(struct test *t, int err)
 }
 
 
-static void ua_event_handler(struct ua *ua, enum ua_event ev,
-			     struct call *call, const char *prm, void *arg)
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
 	struct test *t = arg;
 	size_t i;
+	const char    *prm  = bevent_get_text(event);
+	struct call   *call = bevent_get_call(event);
+	struct ua     *ua   = bevent_get_ua(event);
 	int err = 0;
+	const char referto[] = "sip:user@127.0.0.1";
 	(void)call;
 	(void)prm;
 
@@ -84,6 +91,10 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 
 		err = EAUTH;
 		re_cancel();
+	}
+	else if (ev == UA_EVENT_REFER) {
+		ASSERT_STREQ(referto, prm);
+		++t->n_ev;
 	}
 
  out:
@@ -126,7 +137,7 @@ static int reg(enum sip_transp tp)
 	err = ua_register(t.ua);
 	TEST_ERR(err);
 
-	err = uag_event_register(ua_event_handler, &t);
+	err = bevent_register(event_handler, &t);
 	if (err)
 		goto out;
 
@@ -146,7 +157,7 @@ static int reg(enum sip_transp tp)
 	if (err) {
 		warning("selftest: ua_register test failed (%m)\n", err);
 	}
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 	test_reset(&t);
 
 	return err;
@@ -156,6 +167,10 @@ static int reg(enum sip_transp tp)
 int test_ua_register(void)
 {
 	int err = 0;
+
+#ifdef USE_TLS
+	conf_config()->sip.verify_server = false;
+#endif
 
 	err = ua_init("test", true, true, true);
 	TEST_ERR(err);
@@ -182,25 +197,25 @@ int test_ua_alloc(void)
 	int err = 0;
 
 	/* make sure we dont have that UA already */
-	ASSERT_TRUE(NULL == uag_find_aor("sip:user@127.0.0.1"));
+	ASSERT_TRUE(NULL == uag_find_aor("sip:user@test.invalid"));
 
-	err = ua_alloc(&ua, "Foo <sip:user@127.0.0.1>;regint=0");
+	err = ua_alloc(&ua, "Foo <sip:user@test.invalid>;regint=0");
 	if (err)
 		return err;
 
 	/* verify this UA-instance */
 	ASSERT_TRUE(!ua_isregistered(ua));
-	ASSERT_STREQ("sip:user@127.0.0.1", ua_aor(ua));
+	ASSERT_STREQ("sip:user@test.invalid", account_aor(ua_account(ua)));
 	ASSERT_TRUE(NULL == ua_call(ua));
 
 	/* verify global UA keeper */
 	ASSERT_EQ((n_uas + 1), list_count(uag_list()));
-	ASSERT_TRUE(ua == uag_find_aor("sip:user@127.0.0.1"));
+	ASSERT_TRUE(ua == uag_find_aor("sip:user@test.invalid"));
 
 	/* verify URI complete function */
-	err = ua_uri_complete(ua, mb, "bob");
+	err = account_uri_complete(ua_account(ua), mb, "bob");
 	ASSERT_EQ(0, err);
-	TEST_STRCMP("sip:bob@127.0.0.1", 17, mb->buf, mb->end);
+	TEST_STRCMP("sip:bob@test.invalid", 20, mb->buf, mb->end);
 
 	mem_deref(ua);
 
@@ -219,8 +234,8 @@ int test_uag_find_param(void)
 
 	ASSERT_TRUE(NULL == uag_find_param("not", "found"));
 
-	err  = ua_alloc(&ua1, "<sip:x@127.0.0.1>;regint=0;abc");
-	err |= ua_alloc(&ua2, "<sip:x@127.0.0.1>;regint=0;def=123");
+	err  = ua_alloc(&ua1, "<sip:x@test.invalid>;regint=0;abc");
+	err |= ua_alloc(&ua2, "<sip:x@test.invalid>;regint=0;def=123");
 	if (err)
 		goto out;
 
@@ -265,6 +280,8 @@ static int reg_dns(enum sip_transp tp)
 
 	memset(&t, 0, sizeof(t));
 
+	dnsc_cache_max(net_dnsc(net), 0);
+
 	/*
 	 * Setup server-side mocks:
 	 */
@@ -281,6 +298,7 @@ static int reg_dns(enum sip_transp tp)
 	for (i=0; i<server_count; i++) {
 		struct sa sip_addr;
 		char arec[256];
+		uint8_t addr[16];
 
 		err = sip_server_alloc(&t.srvv[i],
 				       sip_server_exit_handler, NULL);
@@ -300,7 +318,7 @@ static int reg_dns(enum sip_transp tp)
 		info("| SIP-server on %J\n", &sip_addr);
 
 		re_snprintf(arec, sizeof(arec),
-			    "alpha%u.%s", i+1, domain);
+			    "alpha%zu.%s", i+1, domain);
 
 		re_snprintf(srv, sizeof(srv),
 			    "%s.%s", _sip_transp_srvid(tp), domain);
@@ -309,8 +327,23 @@ static int reg_dns(enum sip_transp tp)
 					 arec);
 		TEST_ERR(err);
 
-		err = dns_server_add_a(dnssrv, arec, sa_in(&sip_addr));
-		TEST_ERR(err);
+		switch (sa_af(&sip_addr)) {
+
+		case AF_INET:
+			err = dns_server_add_a(dnssrv, arec, sa_in(&sip_addr));
+			TEST_ERR(err);
+			break;
+
+		case AF_INET6:
+			sa_in6(&sip_addr, addr);
+			err = dns_server_add_aaaa(dnssrv, arec, addr);
+			TEST_ERR(err);
+			break;
+
+		default:
+			err = EAFNOSUPPORT;
+			goto out;
+		}
 	}
 	t.srvc = server_count;
 
@@ -332,7 +365,7 @@ static int reg_dns(enum sip_transp tp)
 	err = ua_register(t.ua);
 	TEST_ERR(err);
 
-	err = uag_event_register(ua_event_handler, &t);
+	err = bevent_register(event_handler, &t);
 	if (err)
 		goto out;
 
@@ -355,7 +388,7 @@ static int reg_dns(enum sip_transp tp)
 	if (err) {
 		warning("selftest: ua_register test failed (%m)\n", err);
 	}
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 
 	test_reset(&t);
 
@@ -438,7 +471,7 @@ static int reg_auth(enum sip_transp tp)
 	err = ua_register(t.ua);
 	TEST_ERR(err);
 
-	err = uag_event_register(ua_event_handler, &t);
+	err = bevent_register(event_handler, &t);
 	if (err)
 		goto out;
 
@@ -460,7 +493,7 @@ static int reg_auth(enum sip_transp tp)
 	if (err) {
 		warning("selftest: ua_register test failed (%m)\n", err);
 	}
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 	test_reset(&t);
 
 	return err;
@@ -508,6 +541,8 @@ static int reg_auth_dns(enum sip_transp tp)
 
 	memset(&t, 0, sizeof(t));
 
+	dnsc_cache_max(net_dnsc(net), 0);
+
 	/*
 	 * Setup server-side mocks:
 	 */
@@ -524,6 +559,7 @@ static int reg_auth_dns(enum sip_transp tp)
 	for (i=0; i<server_count; i++) {
 		struct sa sip_addr;
 		char arec[256];
+		uint8_t addr[16];
 
 		err = sip_server_alloc(&t.srvv[i],
 				       sip_server_exit_handler, NULL);
@@ -566,8 +602,23 @@ static int reg_auth_dns(enum sip_transp tp)
 					 arec);
 		TEST_ERR(err);
 
-		err = dns_server_add_a(dnssrv, arec, sa_in(&sip_addr));
-		TEST_ERR(err);
+		switch (sa_af(&sip_addr)) {
+
+		case AF_INET:
+			err = dns_server_add_a(dnssrv, arec, sa_in(&sip_addr));
+			TEST_ERR(err);
+			break;
+
+		case AF_INET6:
+			sa_in6(&sip_addr, addr);
+			err = dns_server_add_aaaa(dnssrv, arec, addr);
+			TEST_ERR(err);
+			break;
+
+		default:
+			err = EAFNOSUPPORT;
+			goto out;
+		}
 	}
 	t.srvc = server_count;
 
@@ -591,7 +642,7 @@ static int reg_auth_dns(enum sip_transp tp)
 	err = ua_register(t.ua);
 	TEST_ERR(err);
 
-	err = uag_event_register(ua_event_handler, &t);
+	err = bevent_register(event_handler, &t);
 	if (err)
 		goto out;
 
@@ -623,7 +674,7 @@ static int reg_auth_dns(enum sip_transp tp)
 	if (err) {
 		warning("selftest: ua_register test failed (%m)\n", err);
 	}
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 
 	test_reset(&t);
 
@@ -698,7 +749,6 @@ static void options_resp_handler(int err, const struct sip_msg *msg, void *arg)
 	pl_set_mbuf(&content, msg->mb);
 
 	ASSERT_EQ(0, re_regex(content.p, content.l, "v=0"));
-	ASSERT_EQ(0, re_regex(content.p, content.l, "a=tool:baresip"));
 	ASSERT_EQ(0, re_regex(content.p, content.l, "m=audio"));
 
  out:
@@ -712,18 +762,23 @@ static int test_ua_options_base(enum sip_transp transp)
 {
 	struct test t;
 	struct sa laddr;
+	struct sa dst;
 	char uri[256];
 	int n, err = 0;
 
 	test_init(&t);
 
+	conf_config()->avt.rtp_stats = true;
 	err = ua_init("test",
 		      transp == SIP_TRANSP_UDP,
 		      transp == SIP_TRANSP_TCP,
 		      false);
 	TEST_ERR(err);
 
-	err = sip_transp_laddr(uag_sip(), &laddr, transp, NULL);
+	err = sa_set_str(&dst, "127.0.0.1", 5060);
+	TEST_ERR(err);
+
+	err = sip_transp_laddr(uag_sip(), &laddr, transp, &dst);
 	TEST_ERR(err);
 
 	err = ua_alloc(&t.ua, "Foo <sip:user@127.0.0.1>;regint=0");
@@ -731,8 +786,8 @@ static int test_ua_options_base(enum sip_transp transp)
 
 	/* NOTE: no angle brackets in the Request URI */
 	n = re_snprintf(uri, sizeof(uri),
-			"sip:user@127.0.0.1:%u%s",
-			sa_port(&laddr), sip_transp_param(transp));
+			"sip:user@%J%s",
+			&laddr, sip_transp_param(transp));
 	ASSERT_TRUE(n > 0);
 
 	err = ua_options_send(t.ua, uri, options_resp_handler, &t);
@@ -769,6 +824,149 @@ int test_ua_options(void)
 	err |= test_ua_options_base(SIP_TRANSP_UDP);
 	TEST_ERR(err);
 	err |= test_ua_options_base(SIP_TRANSP_TCP);
+	TEST_ERR(err);
+
+ out:
+	return err;
+}
+
+
+static void refer_resp_handler(int err, const struct sip_msg *msg, void *arg)
+{
+	struct test *t = arg;
+	uint32_t clen;
+	const char referto[] = "sip:user@127.0.0.1";
+	struct pl met=PL("REFER");
+
+	ASSERT_EQ(MAGIC, t->magic);
+
+	if (!t->ua)
+		return;
+
+	if (err) {
+		test_abort(t, err);
+		return;
+	}
+
+	++t->n_resp;
+
+	t->tp_resp = msg->tp;
+
+	clen = pl_u32(&msg->clen);
+	ASSERT_EQ(0, clen);
+	ASSERT_PLEQ(&met, &msg->cseq.met);
+
+	switch (t->state) {
+	case 0:
+		if (msg->scode != 403) {
+			test_abort(t, EPROTO);
+			return;
+		}
+
+		ASSERT_EQ(0, err);
+
+		t->ua = mem_deref(t->ua);
+		err = ua_alloc(&t->ua, "Foo <sip:user@127.0.0.1>;regint=0;"
+			       "uas_user=userx;uas_pass=pass;"
+			       "auth_user=userx;auth_pass=pass");
+		TEST_ERR(err);
+
+		err = ua_refer_send(t->ua, t->uri, referto,
+				    refer_resp_handler, t);
+		TEST_ERR(err);
+		break;
+	case 1:
+		if (msg->scode != 202) {
+			test_abort(t, EPROTO);
+			return;
+		}
+
+		ASSERT_TRUE(sip_msg_hdr_has_value(msg, SIP_HDR_REFER_SUB,
+						  "false"))
+		re_cancel();
+		break;
+	}
+
+	++t->state;
+
+ out:
+	if (err)
+		t->err = err;
+}
+
+
+static int test_ua_refer_base(enum sip_transp transp)
+{
+	struct test t;
+	struct sa laddr;
+	struct sa dst;
+	const char referto[] = "sip:user@127.0.0.1";
+	int n, err = 0;
+
+	test_init(&t);
+
+	err = bevent_register(event_handler, &t);
+	TEST_ERR(err);
+
+	err = ua_init("test",
+		      transp == SIP_TRANSP_UDP,
+		      transp == SIP_TRANSP_TCP,
+		      false);
+	TEST_ERR(err);
+
+	err = sa_set_str(&dst, "127.0.0.1", 5060);
+	TEST_ERR(err);
+
+	err = sip_transp_laddr(uag_sip(), &laddr, transp, &dst);
+	TEST_ERR(err);
+
+	err = ua_alloc(&t.ua, "Foo <sip:user@127.0.0.1>;regint=0;"
+		       "uas_user=userx;uas_pass=pass");
+	TEST_ERR(err);
+
+	/* NOTE: no angle brackets in the Request URI */
+	n = re_snprintf(t.uri, sizeof(t.uri),
+			"sip:user@%J%s",
+			&laddr, sip_transp_param(transp));
+	ASSERT_TRUE(n > 0);
+
+
+	err = ua_refer_send(t.ua, t.uri, referto, refer_resp_handler, &t);
+	TEST_ERR(err);
+
+	/* run main-loop with timeout, wait for events */
+	err = re_main_timeout(5000);
+	if (err)
+		goto out;
+
+	if (t.err) {
+		err = t.err;
+		goto out;
+	}
+
+	/* verify after test is complete */
+	ASSERT_EQ(2, t.n_resp);
+	ASSERT_EQ(transp, t.tp_resp);
+	ASSERT_EQ(1, t.n_ev);
+
+ out:
+	test_reset(&t);
+
+	bevent_unregister(event_handler);
+	ua_stop_all(true);
+	ua_close();
+
+	return err;
+}
+
+
+int test_ua_refer(void)
+{
+	int err = 0;
+
+	err |= test_ua_refer_base(SIP_TRANSP_UDP);
+	TEST_ERR(err);
+	err |= test_ua_refer_base(SIP_TRANSP_TCP);
 	TEST_ERR(err);
 
  out:

@@ -1,18 +1,12 @@
 /**
  * @file vidsrc.c Video Source
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
 #include <baresip.h>
 #include "core.h"
-
-
-/** Video Source state */
-struct vidsrc_st {
-	struct vidsrc *vs;  /**< Video Source */
-};
 
 
 static void destructor(void *arg)
@@ -94,12 +88,12 @@ const struct vidsrc *vidsrc_find(const struct list *vidsrcl, const char *name)
  * @param stp     Pointer to allocated state
  * @param vidsrcl List of Video Sources
  * @param name    Name of the video source
- * @param ctx     Optional media context
  * @param prm     Video source parameters
  * @param size    Wanted video size of the source
  * @param fmt     Format parameter
  * @param dev     Video device
  * @param frameh  Video frame handler
+ * @param packeth Video packet handler
  * @param errorh  Error handler (optional)
  * @param arg     Handler argument
  *
@@ -107,27 +101,15 @@ const struct vidsrc *vidsrc_find(const struct list *vidsrcl, const char *name)
  */
 int vidsrc_alloc(struct vidsrc_st **stp, struct list *vidsrcl,
 		 const char *name,
-		 struct media_ctx **ctx, struct vidsrc_prm *prm,
+		 struct vidsrc_prm *prm,
 		 const struct vidsz *size, const char *fmt, const char *dev,
-		 vidsrc_frame_h *frameh, vidsrc_error_h *errorh, void *arg)
+		 vidsrc_frame_h *frameh, vidsrc_packet_h *packeth,
+		 vidsrc_error_h *errorh, void *arg)
 {
 	struct vidsrc *vs = (struct vidsrc *)vidsrc_find(vidsrcl, name);
 	if (!vs)
 		return ENOENT;
 
-	return vs->alloch(stp, vs, ctx, prm, size, fmt, dev,
-			  frameh, errorh, arg);
-}
-
-
-/**
- * Get the video source module from a video source state
- *
- * @param st Video source state
- *
- * @return Video source module
- */
-struct vidsrc *vidsrc_get(struct vidsrc_st *st)
-{
-	return st ? st->vs : NULL;
+	return vs->alloch(stp, vs, prm, size, fmt, dev,
+			  frameh, packeth, errorh, arg);
 }

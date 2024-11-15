@@ -8,7 +8,7 @@
 #include <baresip.h>
 #include <gtk/gtk.h>
 #include "gtk_mod.h"
-
+#include <string.h>
 
 struct call_window {
 	struct gtk_mod *mod;
@@ -22,11 +22,12 @@ struct call_window {
 		struct vumeter_enc *enc;
 	} vu;
 	struct transfer_dialog *transfer_dialog;
+	struct dial_dialog *attended_transfer_dial;
 	GtkWidget *window;
 	GtkLabel *status;
 	GtkLabel *duration;
 	struct {
-		GtkWidget *hangup, *transfer, *hold, *mute;
+		GtkWidget *hangup, *transfer, *hold, *mute, *attended_transfer;
 	} buttons;
 	struct {
 		GtkProgressBar *enc, *dec;
@@ -35,6 +36,8 @@ struct call_window {
 	guint vumeter_timer_tag;
 	bool closed;
 	int cur_key;
+	struct play *play_dtmf_tone;
+	struct call *attended_call;
 };
 
 enum call_window_events {
@@ -43,8 +46,10 @@ enum call_window_events {
 	MQ_HOLD,
 	MQ_MUTE,
 	MQ_TRANSFER,
+	MQ_ATTTRANSFER,
 };
 
+mtx_t last_data_mut;
 static struct call_window *last_call_win = NULL;
 static struct vumeter_dec *last_dec = NULL;
 static struct vumeter_enc *last_enc = NULL;
@@ -82,6 +87,8 @@ static void call_window_update_vumeters(struct call_window *win)
 static gboolean call_timer(gpointer arg)
 {
 	struct call_window *win = arg;
+	if (!win || !win->call)
+		return false;
 	call_window_update_duration(win);
 	return G_SOURCE_CONTINUE;
 }
@@ -90,6 +97,8 @@ static gboolean call_timer(gpointer arg)
 static gboolean vumeter_timer(gpointer arg)
 {
 	struct call_window *win = arg;
+	if (!win || !win->call)
+		return false;
 	call_window_update_vumeters(win);
 	return G_SOURCE_CONTINUE;
 }
@@ -142,30 +151,44 @@ static void call_window_set_vu_enc(struct call_window *win,
 
 void call_window_got_vu_dec(struct vumeter_dec *dec)
 {
-	if (last_call_win)
+	mtx_lock(&last_data_mut);
+	if (last_call_win) {
 		call_window_set_vu_dec(last_call_win, dec);
+		last_dec = NULL;
+	}
 	else
 		last_dec = dec;
+	mtx_unlock(&last_data_mut);
 }
 
 
 void call_window_got_vu_enc(struct vumeter_enc *enc)
 {
-	if (last_call_win)
+	mtx_lock(&last_data_mut);
+	if (last_call_win) {
 		call_window_set_vu_enc(last_call_win, enc);
+		last_enc = NULL;
+	}
 	else
 		last_enc = enc;
+	mtx_unlock(&last_data_mut);
 }
 
 
 static void got_call_window(struct call_window *win)
 {
-	if (last_enc)
+	mtx_lock(&last_data_mut);
+	if (last_enc) {
 		call_window_set_vu_enc(win, last_enc);
-	if (last_dec)
+		last_enc = NULL;
+	}
+	if (last_dec) {
 		call_window_set_vu_dec(win, last_dec);
+		last_dec = NULL;
+	}
 	if (!last_enc || !last_dec)
 		last_call_win = win;
+	mtx_unlock(&last_data_mut);
 }
 
 
@@ -179,10 +202,17 @@ static void call_on_hangup(GtkToggleButton *btn, struct call_window *win)
 static void call_on_hold_toggle(GtkToggleButton *btn, struct call_window *win)
 {
 	bool hold = gtk_toggle_button_get_active(btn);
-	if (hold)
+	if (hold) {
+		gtk_widget_set_sensitive(win->buttons.attended_transfer,
+								TRUE);
 		vumeter_timer_stop(win);
+	}
 	else
+	{
+		gtk_widget_set_sensitive(win->buttons.attended_transfer,
+								FALSE);
 		vumeter_timer_start(win);
+	}
 	mqueue_push(win->mq, MQ_HOLD, (void *)(size_t)hold);
 }
 
@@ -204,6 +234,25 @@ static void call_on_transfer(GtkToggleButton *btn, struct call_window *win)
 }
 
 
+static void call_window_transfer_attended_call(GtkToggleButton *btn,
+						struct call_window *win)
+{
+	(void)btn;
+	mqueue_push(win->mq, MQ_ATTTRANSFER, win);
+}
+
+
+static void call_on_attended_transfer(GtkToggleButton *btn,
+						struct call_window *win)
+{
+	(void)btn;
+	if (!win->attended_transfer_dial)
+		win->attended_transfer_dial =
+					dial_dialog_alloc(win->mod, win->call);
+	dial_dialog_show(win->attended_transfer_dial);
+}
+
+
 static gboolean call_on_window_close(GtkWidget *widget, GdkEventAny *event,
 				     struct call_window *win)
 {
@@ -217,22 +266,33 @@ static gboolean call_on_window_close(GtkWidget *widget, GdkEventAny *event,
 static gboolean call_on_key_press(GtkWidget *window, GdkEvent *ev,
 				  struct call_window *win)
 {
+	struct config *cfg = conf_config();
 	gchar key = ev->key.string[0];
+	char wavfile[32];
 	(void)window;
 
 	switch (key) {
-
 	case '1': case '2': case '3':
 	case '4': case '5': case '6':
-	case '7': case '8': case '9':
-	case '*': case '0': case '#':
-		win->cur_key = key;
-		call_send_digit(win->call, key);
-		return TRUE;
-
+	case '7': case '8': case '9': case '0':
+	case 'a': case 'b': case 'c': case 'd':
+		re_snprintf(wavfile, sizeof wavfile, "sound%c.wav", key);
+		break;
+	case '*':
+		re_snprintf(wavfile, sizeof wavfile, "sound%s.wav", "star");
+		break;
+	case '#':
+		re_snprintf(wavfile, sizeof wavfile, "sound%s.wav", "route");
+		break;
 	default:
 		return FALSE;
 	}
+	(void)play_file(&win->play_dtmf_tone, baresip_player(),
+		wavfile, -1, cfg->audio.alert_mod,
+		cfg->audio.alert_dev);
+	win->cur_key = key;
+	call_send_digit(win->call, key);
+	return TRUE;
 }
 
 
@@ -242,8 +302,9 @@ static gboolean call_on_key_release(GtkWidget *window, GdkEvent *ev,
 	(void)window;
 
 	if (win->cur_key && win->cur_key == ev->key.string[0]) {
-		win->cur_key = 0;
-		call_send_digit(win->call, 0);
+		win->play_dtmf_tone = mem_deref(win->play_dtmf_tone);
+		win->cur_key = KEYCODE_REL;
+		call_send_digit(win->call, KEYCODE_REL);
 		return TRUE;
 	}
 
@@ -265,12 +326,15 @@ static void mqueue_handler(int id, void *data, void *arg)
 	switch ((enum call_window_events)id) {
 
 	case MQ_HANGUP:
-		ua_hangup(uag_current(), win->call, 0, NULL);
+		if (!win->closed) {
+			ua_hangup(call_get_ua(win->call), win->call, 0, NULL);
+			win->closed = true;
+		}
 		break;
 
 	case MQ_CLOSE:
 		if (!win->closed) {
-			ua_hangup(uag_current(), win->call, 0, NULL);
+			ua_hangup(call_get_ua(win->call), win->call, 0, NULL);
 			win->closed = true;
 		}
 		mem_deref(win);
@@ -287,6 +351,10 @@ static void mqueue_handler(int id, void *data, void *arg)
 	case MQ_TRANSFER:
 		call_transfer(win->call, data);
 		break;
+
+	case MQ_ATTTRANSFER:
+		call_replace_transfer(win->attended_call, win->call);
+		break;
 	}
 }
 
@@ -299,30 +367,38 @@ static void call_window_destructor(void *arg)
 	gtk_mod_call_window_closed(window->mod, window);
 	gtk_widget_destroy(window->window);
 	mem_deref(window->transfer_dialog);
+	mem_deref(window->attended_transfer_dial);
 	gdk_threads_leave();
-
-	mem_deref(window->call);
-	mem_deref(window->mq);
-	mem_deref(window->vu.enc);
-	mem_deref(window->vu.dec);
 
 	if (window->duration_timer_tag)
 		g_source_remove(window->duration_timer_tag);
 	if (window->vumeter_timer_tag)
 		g_source_remove(window->vumeter_timer_tag);
 
-	/* TODO: avoid race conditions here */
+	mem_deref(window->call);
+	mem_deref(window->mq);
+	mem_deref(window->vu.enc);
+	mem_deref(window->vu.dec);
+	mem_deref(window->attended_call);
+
+	mtx_lock(&last_data_mut);
 	last_call_win = NULL;
+	mtx_unlock(&last_data_mut);
 }
 
 
-struct call_window *call_window_new(struct call *call, struct gtk_mod *mod)
+struct call_window *call_window_new(struct call *call, struct gtk_mod *mod,
+						struct call *attended_call)
 {
 	struct call_window *win;
 	GtkWidget *window, *label, *status, *button, *progress, *image;
 	GtkWidget *button_box, *vbox, *hbox;
 	GtkWidget *duration;
 	int err = 0;
+
+	err = mtx_init(&last_data_mut, mtx_plain) != thrd_success;
+	if (err)
+		return NULL;
 
 	win = mem_zalloc(sizeof(*win), call_window_destructor);
 	if (!win)
@@ -337,7 +413,7 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod)
 	gtk_window_set_type_hint(GTK_WINDOW(window),
 			GDK_WINDOW_TYPE_HINT_DIALOG);
 
-	vbox = gtk_vbox_new(FALSE, 0);
+	vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_container_add(GTK_CONTAINER(window), vbox);
 
 	/* Peer name and URI */
@@ -356,7 +432,7 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod)
 	gtk_box_pack_start(GTK_BOX(vbox), status, FALSE, FALSE, 0);
 
 	/* Progress bars */
-	hbox = gtk_hbox_new(FALSE, 0);
+	hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	gtk_box_set_spacing(GTK_BOX(hbox), 6);
 	gtk_container_set_border_width(GTK_CONTAINER(hbox), 5);
 	gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
@@ -378,7 +454,7 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod)
 	gtk_box_pack_end(GTK_BOX(hbox), image, FALSE, FALSE, 0);
 
 	/* Buttons */
-	button_box = gtk_hbutton_box_new();
+	button_box = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
 	gtk_button_box_set_layout(GTK_BUTTON_BOX(button_box),
 			GTK_BUTTONBOX_END);
 	gtk_box_set_spacing(GTK_BOX(button_box), 6);
@@ -395,13 +471,33 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod)
 			GTK_ICON_SIZE_BUTTON);
 	gtk_button_set_image(GTK_BUTTON(button), image);
 
-	/* Transfer */
+	/* Blind Transfer */
 	button = gtk_button_new_with_label("Transfer");
 	win->buttons.transfer = button;
 	gtk_box_pack_end(GTK_BOX(button_box), button, FALSE, TRUE, 0);
-	g_signal_connect(button, "clicked", G_CALLBACK(call_on_transfer), win);
+	g_signal_connect(button, "clicked",
+					G_CALLBACK(call_on_transfer), win);
+	image = gtk_image_new_from_icon_name("forward",
+					GTK_ICON_SIZE_BUTTON);
+	gtk_button_set_image(GTK_BUTTON(button), image);
+
+	/* Attended Transfer */
+	button = gtk_button_new_with_label("Att. Transfer");
+	win->buttons.attended_transfer = button;
+	gtk_box_pack_end(GTK_BOX(button_box), button, FALSE, TRUE, 0);
+	if (!attended_call) {
+		g_signal_connect(button, "clicked",
+				G_CALLBACK(call_on_attended_transfer), win);
+	}
+	else {
+		g_signal_connect(button, "clicked",
+			G_CALLBACK(call_window_transfer_attended_call), win);
+	}
 	image = gtk_image_new_from_icon_name("forward", GTK_ICON_SIZE_BUTTON);
 	gtk_button_set_image(GTK_BUTTON(button), image);
+	gtk_widget_set_sensitive (button, FALSE);
+	gtk_widget_set_tooltip_text(button,
+		"Please put the call on 'Hold' to enable attended transfer");
 
 	/* Hold */
 	button = gtk_toggle_button_new_with_label("Hold");
@@ -434,9 +530,11 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod)
 			G_CALLBACK(call_on_key_release), win);
 
 	win->call = mem_ref(call);
+	win->attended_call = mem_ref(attended_call);
 	win->mod = mod;
 	win->window = window;
 	win->transfer_dialog = NULL;
+	win->attended_transfer_dial = NULL;
 	win->status = GTK_LABEL(status);
 	win->duration = GTK_LABEL(duration);
 	win->closed = false;
@@ -465,6 +563,7 @@ void call_window_closed(struct call_window *win, const char *reason)
 {
 	char buf[256];
 	const char *status;
+	const char *user_trigger_reason = "Connection reset by user";
 
 	if (!win)
 		return;
@@ -475,6 +574,7 @@ void call_window_closed(struct call_window *win, const char *reason)
 		win->duration_timer_tag = 0;
 	}
 	gtk_widget_set_sensitive(win->buttons.transfer, FALSE);
+	gtk_widget_set_sensitive(win->buttons.attended_transfer, FALSE);
 	gtk_widget_set_sensitive(win->buttons.hold, FALSE);
 	gtk_widget_set_sensitive(win->buttons.mute, FALSE);
 
@@ -488,7 +588,17 @@ void call_window_closed(struct call_window *win, const char *reason)
 
 	call_window_set_status(win, status);
 	win->transfer_dialog = mem_deref(win->transfer_dialog);
+	win->attended_transfer_dial = mem_deref(win->attended_transfer_dial);
+	win->call = mem_deref(win->call);
+	win->attended_call = mem_deref(win->attended_call);
 	win->closed = true;
+	mtx_destroy(&last_data_mut);
+
+	if (reason && strncmp(reason, user_trigger_reason,
+	    strlen(user_trigger_reason)) == 0) {
+		mqueue_push(win->mq, MQ_CLOSE, win);
+		return;
+	}
 }
 
 
@@ -497,14 +607,23 @@ void call_window_ringing(struct call_window *win)
 	call_window_set_status(win, "ringing");
 }
 
+static void register_call_timer(struct call_window *win)
+{
+	if (!win->duration_timer_tag) {
+		win->duration_timer_tag = g_timeout_add_seconds(
+			1, call_timer, win);
+	}
+}
 
 void call_window_progress(struct call_window *win)
 {
 	if (!win)
 		return;
 
-	win->duration_timer_tag = g_timeout_add_seconds(1, call_timer, win);
+	register_call_timer(win);
+	mtx_lock(&last_data_mut);
 	last_call_win = win;
+	mtx_unlock(&last_data_mut);
 	call_window_set_status(win, "progress");
 }
 
@@ -516,12 +635,11 @@ void call_window_established(struct call_window *win)
 
 	call_window_update_duration(win);
 
-	if (!win->duration_timer_tag) {
-		win->duration_timer_tag = g_timeout_add_seconds(1, call_timer,
-								win);
-	}
+	register_call_timer(win);
 
+	mtx_lock(&last_data_mut);
 	last_call_win = win;
+	mtx_unlock(&last_data_mut);
 	call_window_set_status(win, "established");
 }
 
@@ -544,3 +662,4 @@ bool call_window_is_for_call(struct call_window *win, struct call *call)
 
 	return win->call == call;
 }
+

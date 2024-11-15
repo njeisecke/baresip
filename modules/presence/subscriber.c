@@ -1,7 +1,7 @@
 /**
  * @file subscriber.c Presence subscriber
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <baresip.h>
@@ -235,7 +235,8 @@ static int subscribe(struct presence *pres)
 
 	err = sipevent_subscribe(&pres->sub, uag_sipevent_sock(),
 				 contact_uri(pres->contact), NULL,
-				 ua_aor(ua), "presence", NULL, 600,
+				 account_aor(ua_account(ua)),
+				 "presence", NULL, 600,
 				 ua_cuser(ua), routev, routev[0] ? 1 : 0,
 				 auth_handler, ua_account(ua), true, NULL,
 				 notify_handler, close_handler, pres,

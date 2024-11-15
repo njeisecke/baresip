@@ -1,7 +1,7 @@
 /**
  * @file mwi.c Message Waiting Indication (RFC 3842)
  *
- * Copyright (C) 2010 - 2015 Creytiv.com
+ * Copyright (C) 2010 - 2015 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
@@ -60,7 +60,7 @@ static void notify_handler(struct sip *sip, const struct sip_msg *msg,
 	struct mwi *mwi = arg;
 
 	if (mbuf_get_left(msg->mb)) {
-		ua_event(mwi->ua, UA_EVENT_MWI_NOTIFY, NULL, "%b",
+		bevent_ua_emit(UA_EVENT_MWI_NOTIFY, mwi->ua, "%b",
 			  mbuf_buf(msg->mb), mbuf_get_left(msg->mb));
 	}
 
@@ -79,7 +79,7 @@ static void close_handler(int err, const struct sip_msg *msg,
 	(void)substate;
 
 	info("mwi: subscription for %s closed: %s (%u %r)\n",
-	     ua_aor(mwi->ua),
+	     account_aor(ua_account(mwi->ua)),
 	     err ? strerror(err) : "",
 	     err ? 0 : msg->scode,
 	     err ? 0 : &msg->reason);
@@ -90,6 +90,7 @@ static void close_handler(int err, const struct sip_msg *msg,
 
 static int mwi_subscribe(struct ua *ua)
 {
+	const char *aor = account_aor(ua_account(ua));
 	const char *routev[1];
 	struct mwi *mwi;
 	int err;
@@ -103,10 +104,10 @@ static int mwi_subscribe(struct ua *ua)
 
 	routev[0] = ua_outbound(ua);
 
-	info("mwi: subscribing to messages for %s\n", ua_aor(ua));
+	info("mwi: subscribing to messages for %s\n", aor);
 
-	err = sipevent_subscribe(&mwi->sub, uag_sipevent_sock(), ua_aor(ua),
-				 NULL, ua_aor(ua), "message-summary", NULL,
+	err = sipevent_subscribe(&mwi->sub, uag_sipevent_sock(), aor,
+				 NULL, aor, "message-summary", NULL,
 	                         600, ua_cuser(ua),
 				 routev, routev[0] ? 1 : 0,
 	                         auth_handler, ua_account(ua), true, NULL,
@@ -140,26 +141,27 @@ static struct mwi *mwi_find(const struct ua *ua)
 }
 
 
-static void ua_event_handler(struct ua *ua, enum ua_event ev,
-			     struct call *call, const char *prm, void *arg)
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
-	(void)call;
-	(void)prm;
+	struct ua *ua = bevent_get_ua(event);
+	const struct account *acc = ua_account(ua);
 	(void)arg;
 
 	if (ev == UA_EVENT_REGISTER_OK) {
 
-		if (!mwi_find(ua) &&
-		    (str_casecmp(account_mwi(ua_account(ua)), "yes") == 0))
+		if (!mwi_find(ua) && account_mwi(acc))
 			mwi_subscribe(ua);
 	}
-	else if (ev == UA_EVENT_SHUTDOWN) {
+	else if (ev == UA_EVENT_SHUTDOWN ||
+		 (ev == UA_EVENT_UNREGISTERING &&
+		  str_cmp(account_sipnat(acc), "outbound") == 0)) {
 
 		struct mwi *mwi = mwi_find(ua);
 
 		if (mwi) {
 
-			info("mwi: shutdown of %s\n", ua_aor(ua));
+			info("mwi: shutdown of %s\n", account_aor(acc));
+
 			mwi->shutdown = true;
 
 			if (mwi->sub) {
@@ -191,13 +193,13 @@ static int module_init(void)
 	list_init(&mwil);
 	tmr_start(&tmr, 1, tmr_handler, 0);
 
-	return uag_event_register(ua_event_handler, NULL);
+	return bevent_register(event_handler, NULL);
 }
 
 
 static int module_close(void)
 {
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 	tmr_cancel(&tmr);
 	list_flush(&mwil);
 

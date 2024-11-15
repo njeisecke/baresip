@@ -1,7 +1,7 @@
 /**
  * @file opus.c Opus Audio Codec
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -41,7 +41,7 @@
 
 
 static bool opus_mirror;
-static char fmtp[256] = "";
+static char fmtp[256];
 static char fmtp_mirror[256];
 
 uint32_t opus_complexity = 10;
@@ -97,10 +97,13 @@ static int module_init(void)
 {
 	struct conf *conf = conf_cur();
 	uint32_t value;
-	char *p = fmtp + str_len(fmtp);
+	char *p = fmtp;
 	bool b, stereo = true, sprop_stereo = true;
 	struct pl pl;
 	int n = 0;
+
+	fmtp[0] = '\0';
+	fmtp_mirror[0] = '\0';
 
 	conf_get_bool(conf, "opus_stereo", &stereo);
 	conf_get_bool(conf, "opus_sprop_stereo", &sprop_stereo);
@@ -161,8 +164,6 @@ static int module_init(void)
 				";usedtx=%d", b);
 		if (n <= 0)
 			return ENOMEM;
-
-		p += n;
 	}
 
 	(void)conf_get_bool(conf, "opus_mirror", &opus_mirror);

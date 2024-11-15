@@ -1,7 +1,7 @@
 /**
  * @file src/net.c Networking code
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
 #include <baresip.h>
@@ -10,27 +10,21 @@
 
 struct network {
 	struct config_net cfg;
-	struct sa laddr;
-#ifdef HAVE_INET6
-	struct sa laddr6;
-#endif
-	struct tmr tmr;
+	struct list laddrs;       /**< List of local addresses           */
+
 	struct dnsc *dnsc;
-	struct sa nsv[NET_MAX_NS];/**< Configured name servers      */
-	uint32_t nsn;        /**< Number of configured name servers */
-	uint32_t interval;
-	char domain[64];     /**< DNS domain from network           */
-	net_change_h *ch;
-	void *arg;
+	struct sa nsv[NET_MAX_NS];/**< Configured name servers           */
+	uint32_t nsn;        /**< Number of configured name servers      */
+	struct sa nsvf[NET_MAX_NS];/**< Configured fallback name servers */
+	uint32_t nsnf;       /**< Number of configured fallback name servers */
 };
 
 
-struct ifentry {
-	int af;
+struct laddr {
+	struct le le;
+
 	char *ifname;
-	struct sa *ip;
-	size_t sz;
-	bool found;
+	struct sa sa;
 };
 
 
@@ -38,78 +32,36 @@ static void net_destructor(void *data)
 {
 	struct network *net = data;
 
-	tmr_cancel(&net->tmr);
 	mem_deref(net->dnsc);
+	list_flush(&net->laddrs);
 }
 
 
-static bool if_getname_handler(const char *ifname, const struct sa *sa,
-			       void *arg)
+static void laddr_destructor(void *data)
 {
-	struct ifentry *ife = arg;
+	struct laddr *laddr = data;
 
-	if (ife->af != sa_af(sa))
-		return false;
-
-	if (sa_cmp(sa, ife->ip, SA_ADDR)) {
-		str_ncpy(ife->ifname, ifname, ife->sz);
-		ife->found = true;
-		return true;
-	}
-
-	return false;
+	list_unlink(&laddr->le);
+	mem_deref(laddr->ifname);
 }
 
 
-static int network_if_getname(char *ifname, size_t sz,
-			      int af, const struct sa *ip)
-{
-	struct ifentry ife;
-	int err;
-
-	if (!ifname || !sz || !ip)
-		return EINVAL;
-
-	ife.af     = af;
-	ife.ifname = ifname;
-	ife.ip     = (struct sa *)ip;
-	ife.sz     = sz;
-	ife.found  = false;
-
-	err = net_if_apply(if_getname_handler, &ife);
-
-	return ife.found ? err : ENODEV;
-}
-
-
-static int print_addr(struct re_printf *pf, const struct sa *ip)
-{
-	if (!ip)
-		return 0;
-
-	if (sa_isset(ip, SA_ADDR)) {
-
-		char ifname[256] = "???";
-
-		network_if_getname(ifname, sizeof(ifname), sa_af(ip), ip);
-
-		return re_hprintf(pf, "%s|%j", ifname, ip);
-	}
-	else {
-		return re_hprintf(pf, "(not set)");
-	}
-}
-
-
-static int net_dnssrv_add(struct network *net, const struct sa *sa)
+static int net_dns_srv_add(struct network *net, const struct sa *sa,
+		bool fallback)
 {
 	if (!net)
 		return EINVAL;
 
-	if (net->nsn >= ARRAY_SIZE(net->nsv))
+	if (!fallback && net->nsn >= RE_ARRAY_SIZE(net->nsv))
 		return E2BIG;
 
-	sa_cpy(&net->nsv[net->nsn++], sa);
+	if (fallback && net->nsnf >= RE_ARRAY_SIZE(net->nsvf))
+		return E2BIG;
+
+	if (fallback)
+		sa_cpy(&net->nsvf[net->nsnf++], sa);
+	else
+		sa_cpy(&net->nsv[net->nsn++], sa);
 
 	return 0;
 }
@@ -119,17 +71,14 @@ static int net_dns_srv_get(const struct network *net,
 			   struct sa *srvv, uint32_t *n, bool *from_sys)
 {
 	struct sa nsv[NET_MAX_NS];
-	uint32_t i, nsn = ARRAY_SIZE(nsv);
+	uint32_t i, nsn = RE_ARRAY_SIZE(nsv);
+	uint32_t offset;
+	uint32_t limit = *n;
 	int err;
-
-	err = dns_srv_get(NULL, 0, nsv, &nsn);
-	if (err) {
-		nsn = 0;
-	}
 
 	if (net->nsn) {
 
-		if (net->nsn > *n)
+		if (net->nsn > limit)
 			return E2BIG;
 
 		/* Use any configured nameservers */
@@ -143,7 +92,11 @@ static int net_dns_srv_get(const struct network *net,
 			*from_sys = false;
 	}
 	else {
-		if (nsn > *n)
+		err = dns_srv_get(NULL, 0, nsv, &nsn);
+		if (err)
+			nsn = 0;
+
+		if (nsn > limit)
 			return E2BIG;
 
 		for (i=0; i<nsn; i++)
@@ -155,6 +108,22 @@ static int net_dns_srv_get(const struct network *net,
 			*from_sys = true;
 	}
 
+	/* Add Fallback nameservers */
+	if (net->nsnf) {
+		offset = *n;
+		if ((offset + net->nsnf) > limit) {
+			debug("net: too many DNS nameservers, "
+					"fallback DNS ignored\n");
+			return 0;
+		}
+
+		for (i=0; i<net->nsnf; i++) {
+			srvv[offset+i] = net->nsvf[i];
+		}
+
+		*n = offset + net->nsnf;
+	}
+
 	return 0;
 }
 
@@ -162,103 +131,19 @@ static int net_dns_srv_get(const struct network *net,
 /*
  * Check for DNS Server updates
  */
-static void dns_refresh(struct network *net)
+void net_dns_refresh(struct network *net)
 {
 	struct sa nsv[NET_MAX_NS];
 	uint32_t nsn;
 	int err;
 
-	nsn = ARRAY_SIZE(nsv);
+	nsn = RE_ARRAY_SIZE(nsv);
 
 	err = net_dns_srv_get(net, nsv, &nsn, NULL);
 	if (err)
 		return;
 
 	(void)dnsc_srv_set(net->dnsc, nsv, nsn);
-}
-
-
-/*
- * Detect changes in IP address(es)
- */
-static void ipchange_handler(void *arg)
-{
-	struct network *net = arg;
-	bool change;
-
-	tmr_start(&net->tmr, net->interval * 1000, ipchange_handler, net);
-
-	dns_refresh(net);
-
-	change = net_check(net);
-	if (change && net->ch) {
-		net->ch(net->arg);
-	}
-}
-
-
-/**
- * Check if local IP address(es) changed
- *
- * @param net Network instance
- *
- * @return True if changed, otherwise false
- */
-bool net_check(struct network *net)
-{
-	struct sa laddr;
-#ifdef HAVE_INET6
-	struct sa laddr6;
-#endif
-	bool change = false;
-
-	if (!net)
-		return false;
-
-	laddr = net->laddr;
-#ifdef HAVE_INET6
-	laddr6 = net->laddr6;
-#endif
-
-	if (str_isset(net->cfg.ifname)) {
-
-		if (net_af_enabled(net, AF_INET))
-			net_if_getaddr(net->cfg.ifname, AF_INET, &net->laddr);
-
-#ifdef HAVE_INET6
-		if (net_af_enabled(net, AF_INET6))
-			net_if_getaddr(net->cfg.ifname, AF_INET6,
-				       &net->laddr6);
-#endif
-	}
-	else {
-		if (net_af_enabled(net, AF_INET))
-			net_default_source_addr_get(AF_INET, &net->laddr);
-
-#ifdef HAVE_INET6
-		if (net_af_enabled(net, AF_INET6))
-			net_default_source_addr_get(AF_INET6, &net->laddr6);
-#endif
-	}
-
-	if (sa_isset(&net->laddr, SA_ADDR) &&
-	    !sa_cmp(&laddr, &net->laddr, SA_ADDR)) {
-		change = true;
-		info("net: local IPv4 address changed: %j -> %j\n",
-		     &laddr, &net->laddr);
-	}
-
-#ifdef HAVE_INET6
-	if (sa_isset(&net->laddr6, SA_ADDR) &&
-	    !sa_cmp(&laddr6, &net->laddr6, SA_ADDR)) {
-		change = true;
-		info("net: local IPv6 address changed: %j -> %j\n",
-		     &laddr6, &net->laddr6);
-	}
-#endif
-	debug("net: check for IP changes: change=%d\n", change);
-
-	return change;
 }
 
 
@@ -289,7 +174,7 @@ bool net_af_enabled(const struct network *net, int af)
 static int dns_init(struct network *net)
 {
 	struct sa nsv[NET_MAX_NS];
-	uint32_t nsn = ARRAY_SIZE(nsv);
+	uint32_t nsn = RE_ARRAY_SIZE(nsv);
 	int err;
 
 	err = net_dns_srv_get(net, nsv, &nsn, NULL);
@@ -312,6 +197,150 @@ static bool check_ipv6(void)
 
 
 /**
+ * Add a local IP address with given interface name
+ *
+ * @param net    Network instance
+ * @param sa     IP address
+ * @param ifname Interface name
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int  net_add_address_ifname(struct network *net, const struct sa *sa,
+			    const char *ifname)
+{
+	struct le *le;
+	struct laddr *laddr;
+	int err = 0;
+
+	if (!net || !str_isset(ifname) || !sa)
+		return EINVAL;
+
+	LIST_FOREACH(&net->laddrs, le) {
+		laddr = le->data;
+		if (sa_cmp(&laddr->sa, sa, SA_ADDR))
+			goto out;
+	}
+
+	laddr = mem_zalloc(sizeof(*laddr), laddr_destructor);
+	if (!laddr)
+		return ENOMEM;
+
+	laddr->sa = *sa;
+	err = str_dup(&laddr->ifname, ifname);
+	if (err)
+		goto out;
+
+	list_append(&net->laddrs, &laddr->le, laddr);
+
+out:
+	if (err)
+		mem_deref(laddr);
+
+	return err;
+}
+
+
+static bool add_laddr_filter(const char *ifname, const struct sa *sa,
+			     void *arg)
+{
+	struct network *net = arg;
+
+	if (!net_ifaddr_filter(net, ifname, sa))
+		return false;
+
+	(void)net_add_address_ifname(net, sa, ifname);
+	return false;
+}
+
+
+static bool if_debug_handler(const char *ifname, const struct sa *sa,
+			     void *arg)
+{
+	void **argv = arg;
+	struct re_printf *pf = argv[0];
+	struct network *net = argv[1];
+	bool def;
+	int err = 0;
+
+	def = sa_cmp(net_laddr_af(baresip_network(), sa_af(sa)), sa, SA_ADDR);
+
+	if (net_af_enabled(net, sa_af(sa)))
+		err = re_hprintf(pf, " %10s:  %j %s\n", ifname, sa,
+				 def ? "(default)" : "");
+
+	return err != 0;
+}
+
+
+static int check_route(const struct sa *src, const struct sa *dst)
+{
+	struct sa ip;
+	int err;
+
+	err = net_dst_source_addr_get(dst, &ip);
+	if (err)
+		return err;
+
+	if (!sa_cmp(src, &ip, SA_ADDR))
+		return ECONNREFUSED;
+
+	return 0;
+}
+
+
+enum laddr_check {
+	LADDR_NOLINKLOCAL = 1,
+	LADDR_INTERNET = 2
+};
+
+
+static const struct sa *find_laddr_af(const struct network *net, int af,
+		enum laddr_check lc)
+{
+	struct le *le;
+	struct sa dst;
+	int err;
+
+	if (!net)
+		return NULL;
+
+	sa_init(&dst, af);
+	if (af == AF_INET6)
+		err = sa_set_str(&dst, "1::1", 53);
+	else
+		err = sa_set_str(&dst, "1.1.1.1", 53);
+
+	if (err)
+		return NULL;
+
+	LIST_FOREACH(&net->laddrs, le) {
+		struct laddr *laddr = le->data;
+		if (sa_af(&laddr->sa) != af)
+			continue;
+
+		if ((lc & LADDR_NOLINKLOCAL) && sa_is_linklocal(&laddr->sa))
+			continue;
+
+		if ((lc & LADDR_INTERNET) && check_route(&laddr->sa, &dst))
+			continue;
+
+		return &laddr->sa;
+	}
+
+	return NULL;
+}
+
+
+static bool print_addr(const char *ifname, const struct sa *sa, void *arg)
+{
+	(void) arg;
+
+	info(" %10s:  %j\n", ifname, sa);
+	return false;
+}
+
+
+/**
  * Initialise networking
  *
  * @param netp Pointer to allocated network instance
@@ -322,9 +351,6 @@ static bool check_ipv6(void)
 int net_alloc(struct network **netp, const struct config_net *cfg)
 {
 	struct network *net;
-	struct sa nsv[NET_MAX_NS];
-	uint32_t nsn = ARRAY_SIZE(nsv);
-	char buf4[128] = "", buf6[128] = "";
 	int err;
 
 	if (!netp || !cfg)
@@ -335,27 +361,17 @@ int net_alloc(struct network **netp, const struct config_net *cfg)
 	 * if different the size of `struct sa' will not match and the
 	 * application is very likely to crash.
 	 */
-#ifdef HAVE_INET6
 	if (!check_ipv6()) {
 		warning("libre was compiled without IPv6-support"
 			", but baresip was compiled with\n");
 		return EAFNOSUPPORT;
 	}
-#else
-	if (check_ipv6()) {
-		warning("libre was compiled with IPv6-support"
-			", but baresip was compiled without\n");
-		return EAFNOSUPPORT;
-	}
-#endif
 
 	net = mem_zalloc(sizeof(*net), net_destructor);
 	if (!net)
 		return ENOMEM;
 
 	net->cfg = *cfg;
-
-	tmr_init(&net->tmr);
 
 	if (cfg->nsc) {
 		size_t i;
@@ -373,7 +389,7 @@ int net_alloc(struct network **netp, const struct config_net *cfg)
 				goto out;
 			}
 
-			err = net_dnssrv_add(net, &sa);
+			err = net_dns_srv_add(net, &sa, cfg->nsv[i].fallback);
 			if (err) {
 				warning("net: failed to add nameserver: %m\n",
 					err);
@@ -389,102 +405,18 @@ int net_alloc(struct network **netp, const struct config_net *cfg)
 		goto out;
 	}
 
-	sa_init(&net->laddr, AF_INET);
+	if (cfg->use_getaddrinfo)
+		dnsc_getaddrinfo(net->dnsc, true);
+	else
+		dnsc_getaddrinfo(net->dnsc, false);
 
-	if (str_isset(cfg->ifname)) {
-
-		struct sa temp_sa;
-		bool got_it = false;
-
-		info("Binding to interface or IP address '%s'\n", cfg->ifname);
-
-		/* check for valid IP-address */
-		if (0 == sa_set_str(&temp_sa, cfg->ifname, 0)) {
-
-			switch (sa_af(&temp_sa)) {
-
-			case AF_INET:
-				net->laddr = temp_sa;
-				break;
-
-#ifdef HAVE_INET6
-			case AF_INET6:
-				net->laddr6 = temp_sa;
-				break;
-#endif
-
-			default:
-				err = EAFNOSUPPORT;
-				goto out;
-			}
-
-			goto print_network_data;
-		}
-
-		if (net_af_enabled(net, AF_INET)) {
-
-			err = net_if_getaddr(cfg->ifname, AF_INET,
-					     &net->laddr);
-			if (err) {
-				info("net: %s: could not get IPv4 address"
-				     " (%m)\n",
-				     cfg->ifname, err);
-			}
-			else
-				got_it = true;
-		}
-
-#ifdef HAVE_INET6
-		if (net_af_enabled(net, AF_INET6)) {
-
-			err = net_if_getaddr(cfg->ifname, AF_INET6,
-					     &net->laddr6);
-			if (err) {
-				info("net: %s: could not get IPv6 address"
-				     " (%m)\n",
-				     cfg->ifname, err);
-			}
-			else
-				got_it = true;
-		}
-#endif
-		if (got_it)
-			err = 0;
-		else {
-			warning("net: %s: could not get network address\n",
-				cfg->ifname);
-			err = EADDRNOTAVAIL;
-			goto out;
-		}
-	}
-	else {
-		if (net_af_enabled(net, AF_INET))
-			net_default_source_addr_get(AF_INET, &net->laddr);
-
-#ifdef HAVE_INET6
-		sa_init(&net->laddr6, AF_INET6);
-
-		if (net_af_enabled(net, AF_INET6))
-			net_default_source_addr_get(AF_INET6, &net->laddr6);
-#endif
-	}
-
-print_network_data:
-
-	if (sa_isset(&net->laddr, SA_ADDR)) {
-		re_snprintf(buf4, sizeof(buf4), " IPv4=%H",
-			    print_addr, &net->laddr);
-	}
-#ifdef HAVE_INET6
-	if (sa_isset(&net->laddr6, SA_ADDR)) {
-		re_snprintf(buf6, sizeof(buf6), " IPv6=%H",
-			    print_addr, &net->laddr6);
-	}
-#endif
-
-	(void)dns_srv_get(net->domain, sizeof(net->domain), nsv, &nsn);
-
-	info("Local network address: %s %s\n", buf4, buf6);
+	net_if_apply(add_laddr_filter, net);
+	info("Local network addresses:\n");
+	if (!list_count(&net->laddrs))
+		info("  None available for net_interface: %s\n",
+				str_isset(cfg->ifname) ? cfg->ifname : "-");
+	else
+		net_laddr_apply(net, print_addr, NULL);
 
  out:
 	if (err)
@@ -512,7 +444,7 @@ int net_use_nameserver(struct network *net, const struct sa *srvv, size_t srvc)
 	if (!net)
 		return EINVAL;
 
-	net->nsn = (uint32_t)min(ARRAY_SIZE(net->nsv), srvc);
+	net->nsn = (uint32_t)min(RE_ARRAY_SIZE(net->nsv), srvc);
 
 	if (srvv) {
 		for (i=0; i<srvc; i++) {
@@ -520,7 +452,7 @@ int net_use_nameserver(struct network *net, const struct sa *srvv, size_t srvc)
 		}
 	}
 
-	dns_refresh(net);
+	net_dns_refresh(net);
 
 	return 0;
 }
@@ -536,22 +468,66 @@ int net_use_nameserver(struct network *net, const struct sa *srvv, size_t srvc)
  */
 int net_set_address(struct network *net, const struct sa *ip)
 {
+	struct config_net *cfg = &net->cfg;
+
 	if (!net)
 		return EINVAL;
 
-	switch (sa_af(ip)) {
+	re_snprintf(cfg->ifname, sizeof(cfg->ifname), "%j", ip);
 
-	case AF_INET:
-		sa_cpy(&net->laddr, ip);
-		break;
+	net_flush_addresses(net);
+	net_if_apply(add_laddr_filter, net);
+	return 0;
+}
 
-#ifdef HAVE_INET6
-	case AF_INET6:
-		sa_cpy(&net->laddr6, ip);
-		break;
-#endif
-	default:
-		return EAFNOSUPPORT;
+
+/**
+ * Add a local IP address
+ *
+ * @param net  Network instance
+ * @param ip   IP address
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int net_add_address(struct network *net, const struct sa *ip)
+{
+	char ifname[256] = "???";
+	int err;
+
+	if (!net || !sa_isset(ip, SA_ADDR))
+		return EINVAL;
+
+	err = net_if_getname(ifname, sizeof(ifname), sa_af(ip), ip);
+	if (err)
+		goto out;
+
+	err = net_add_address_ifname(net, ip, ifname);
+
+out:
+	return err;
+}
+
+
+/**
+ * Remove a local IP address
+ *
+ * @param net  Network instance
+ * @param ip   IP address
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int net_rm_address(struct network *net, const struct sa *ip)
+{
+	struct le *le;
+	if (!net)
+		return EINVAL;
+
+	LIST_FOREACH(&net->laddrs, le) {
+		struct laddr *laddr = le->data;
+		if (sa_cmp(&laddr->sa, ip, SA_ADDR)) {
+			mem_deref(laddr);
+			break;
+		}
 	}
 
 	return 0;
@@ -559,40 +535,27 @@ int net_set_address(struct network *net, const struct sa *ip)
 
 
 /**
- * Check for networking changes with a regular interval
+ * Remove all local IP addresses
  *
- * @param net       Network instance
- * @param interval  Interval in seconds
- * @param ch        Handler called when a change was detected
- * @param arg       Handler argument
+ * @param net  Network instance
+ *
+ * @return 0 if success, otherwise errorcode
  */
-void net_change(struct network *net, uint32_t interval,
-		net_change_h *ch, void *arg)
+int net_flush_addresses(struct network *net)
 {
+	struct le *le;
 	if (!net)
-		return;
+		return EINVAL;
 
-	net->interval = interval;
-	net->ch = ch;
-	net->arg = arg;
+	le = list_head(&net->laddrs);
+	while (le) {
+		struct laddr *laddr = le->data;
+		le = le->next;
 
-	if (interval)
-		tmr_start(&net->tmr, interval * 1000, ipchange_handler, net);
-	else
-		tmr_cancel(&net->tmr);
-}
-
-
-/**
- * Force a change in the network interfaces
- *
- * @param net Network instance
- */
-void net_force_change(struct network *net)
-{
-	if (net && net->ch) {
-		net->ch(net->arg);
+		mem_deref(laddr);
 	}
+
+	return 0;
 }
 
 
@@ -607,7 +570,7 @@ void net_force_change(struct network *net)
 int net_dns_debug(struct re_printf *pf, const struct network *net)
 {
 	struct sa nsv[NET_MAX_NS];
-	uint32_t i, nsn = ARRAY_SIZE(nsv);
+	uint32_t i, nsn = RE_ARRAY_SIZE(nsv);
 	bool from_sys = false;
 	int err;
 
@@ -618,8 +581,10 @@ int net_dns_debug(struct re_printf *pf, const struct network *net)
 	if (err)
 		nsn = 0;
 
-	err = re_hprintf(pf, " DNS Servers from %s: (%u)\n",
-			 from_sys ? "System" : "Config", nsn);
+	err = re_hprintf(pf, " DNS Servers from %s%s: (%u)\n",
+			 from_sys ? "System" : "Config",
+			 net->cfg.use_getaddrinfo ? "(+getaddrinfo)" : "",
+			 nsn);
 	for (i=0; i<nsn; i++)
 		err |= re_hprintf(pf, "   %u: %J\n", i, &nsv[i]);
 
@@ -647,18 +612,32 @@ int net_set_af(struct network *net, int af)
 }
 
 
-static bool if_debug_handler(const char *ifname, const struct sa *sa,
-			     void *arg)
+bool net_ifaddr_filter(const struct network *net, const char *ifname,
+			      const struct sa *sa)
 {
-	void **argv = arg;
-	struct re_printf *pf = argv[0];
-	struct network *net = argv[1];
-	int err = 0;
+	const struct config_net *cfg = &net->cfg;
+	struct sa ip;
 
-	if (net_af_enabled(net, sa_af(sa)))
-		err = re_hprintf(pf, " %10s:  %j\n", ifname, sa);
+	if (!sa_isset(sa, SA_ADDR))
+		return false;
 
-	return err != 0;
+	if (sa_is_linklocal(sa) && !cfg->use_linklocal)
+		return false;
+
+	if (str_isset(cfg->ifname) && 0 == sa_set_str(&ip, cfg->ifname, 0) &&
+			sa_cmp(&ip, sa, SA_ADDR))
+		return true;
+
+	if (str_isset(cfg->ifname) && str_cmp(cfg->ifname, ifname))
+		return false;
+
+	if (!net_af_enabled(net, sa_af(sa)))
+		return false;
+
+	if (sa_is_loopback(sa))
+		return false;
+
+	return true;
 }
 
 
@@ -672,17 +651,105 @@ static bool if_debug_handler(const char *ifname, const struct sa *sa,
  */
 const struct sa *net_laddr_af(const struct network *net, int af)
 {
-	if (!net)
+	const struct sa *sa;
+
+	sa = find_laddr_af(net, af, LADDR_NOLINKLOCAL | LADDR_INTERNET);
+	if (sa)
+		return sa;
+
+	sa = find_laddr_af(net, af, LADDR_NOLINKLOCAL);
+	if (sa)
+		return sa;
+
+	sa = find_laddr_af(net, af, 0);
+	return sa;
+}
+
+
+const struct sa *net_laddr_for(const struct network *net,
+			       const struct sa *dst)
+{
+	struct le *le;
+
+	if (!net || !sa_isset(dst, SA_ADDR))
 		return NULL;
 
-	switch (af) {
+	LIST_FOREACH(&net->laddrs, le) {
+		struct laddr *laddr = le->data;
+		if (sa_af(&laddr->sa) != sa_af(dst))
+			continue;
 
-	case AF_INET:  return &net->laddr;
-#ifdef HAVE_INET6
-	case AF_INET6: return &net->laddr6;
-#endif
-	default:       return NULL;
+		if (check_route(&laddr->sa, dst))
+			continue;
+
+		return &laddr->sa;
 	}
+
+	return NULL;
+}
+
+
+static bool laddr_cmp(struct le *le, void *arg)
+{
+	struct laddr *laddr = le->data;
+	struct sa *sa = arg;
+
+	return sa_cmp(&laddr->sa, sa, SA_ADDR);
+}
+
+
+static int net_dst_is_source_addr(const struct sa *dst, const struct sa *ip)
+{
+	struct sa src;
+	int err;
+
+	err = net_dst_source_addr_get(dst, &src);
+	if (err)
+		return err;
+
+	if (!sa_cmp(ip, &src, SA_ADDR))
+		return ECONNREFUSED;
+
+	return 0;
+}
+
+
+/**
+ * Checks if given IP address is a local address.
+ *
+ * @param net Network instance
+ * @param sa  IP address to check
+ *
+ * @return true if sa is a local address, false if not
+ */
+bool net_is_laddr(const struct network *net, struct sa *sa)
+{
+	return NULL != list_apply(&net->laddrs, true, laddr_cmp, sa);
+}
+
+
+int net_set_dst_scopeid(const struct network *net, struct sa *dst)
+{
+	struct le *le;
+	struct sa dstc;
+	if (!net || !dst)
+		return EINVAL;
+
+	sa_cpy(&dstc, dst);
+	LIST_FOREACH(&net->laddrs, le) {
+		struct laddr *laddr = le->data;
+		struct sa *sa = &laddr->sa;
+		if (sa_af(sa) != AF_INET6 || !sa_is_linklocal(sa))
+			continue;
+
+		sa_set_scopeid(&dstc, sa_scopeid(&laddr->sa));
+		if (!net_dst_is_source_addr(&dstc, &laddr->sa)) {
+			sa_cpy(dst, &dstc);
+			return 0;
+		}
+	}
+
+	return ECONNREFUSED;
 }
 
 
@@ -703,18 +770,40 @@ struct dnsc *net_dnsc(const struct network *net)
 
 
 /**
- * Get the network domain name
+ * Set the DNS Client
  *
- * @param net Network instance
+ * @param net  Network instance
+ * @param dnsc The DNS client
  *
- * @return Network domain
+ * @return 0 on success, otherwise errorcode
  */
-const char *net_domain(const struct network *net)
+int net_set_dnsc(struct network *net, struct dnsc *dnsc)
 {
 	if (!net)
-		return NULL;
+		return EINVAL;
 
-	return net->domain[0] ? net->domain : NULL;
+	if (net->dnsc)
+		mem_deref(net->dnsc);
+
+	net->dnsc = dnsc;
+
+	return 0;
+}
+
+
+bool net_laddr_apply(const struct network *net, net_ifaddr_h *ifh, void *arg)
+{
+	struct le *le;
+	if (!net || !ifh)
+		return true;
+
+	LIST_FOREACH(&net->laddrs, le) {
+		struct laddr *laddr = le->data;
+		if (ifh(laddr->ifname, &laddr->sa, arg))
+			return true;
+	}
+
+	return false;
 }
 
 
@@ -735,18 +824,8 @@ int net_debug(struct re_printf *pf, const struct network *net)
 		return 0;
 
 	err  = re_hprintf(pf, "--- Network debug ---\n");
-	err |= re_hprintf(pf, " Local IPv4:  [%s] %H\n",
-			  net_af_enabled(net, AF_INET) ? "E" : ".",
-			  print_addr, &net->laddr);
-#ifdef HAVE_INET6
-	err |= re_hprintf(pf, " Local IPv6:  [%s] %H\n",
-			  net_af_enabled(net, AF_INET6) ? "E" : ".",
-			  print_addr, &net->laddr6);
-#endif
-	err |= re_hprintf(pf, " Domain: %s\n", net->domain);
-
-	err |= re_hprintf(pf, "net interfaces:\n");
-	err |= net_if_apply(if_debug_handler, argv);
+	err |= re_hprintf(pf, "enabled interfaces:\n");
+	net_laddr_apply(net, if_debug_handler, argv);
 
 	err |= net_dns_debug(pf, net);
 

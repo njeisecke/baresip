@@ -1,7 +1,7 @@
 /**
  * @file magic.h  Interface to magic macros
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 
@@ -18,8 +18,8 @@
 #define MAGIC_CHECK(s) \
 	if (MAGIC != s->magic) {					\
 		warning("%s: wrong magic struct=%p (magic=0x%08x)\n",	\
-			__REFUNC__, s, s->magic);			\
-		BREAKPOINT;						\
+			__func__, s, s->magic);			\
+		re_assert(false);					\
 	}
 #else
 #define MAGIC_DECL

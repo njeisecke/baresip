@@ -1,7 +1,7 @@
 /**
  * @file opus/decode.c Opus Decode
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -99,7 +99,7 @@ int opus_decode_frm(struct audec_state *ads,
 		return ENOTSUP;
 	}
 
-	*sampc = n * ads->ch;
+	*sampc = (size_t)n * ads->ch;
 
 	return 0;
 }

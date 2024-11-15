@@ -1,84 +1,93 @@
 /**
- * @file mock/mock_aucodec.c Mock audio codec
+ * @file mock_aucodec.c mockup for audio codec with float support
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2024 commend.com - Christian Spielberger
  */
 
-#include <string.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
+#include <string.h>
 #include "../test.h"
 
 
-static int mock_raw_encode(struct auenc_state *st,
-			   bool *marker, uint8_t *buf, size_t *len,
-			   int fmt, const void *sampv, size_t sampc)
+static int encode(struct auenc_state *aes, bool *marker, uint8_t *buf,
+		       size_t *len, int fmt, const void *sampv, size_t sampc)
 {
-	const size_t sampsz = aufmt_sample_size(fmt);
-	size_t bytes;
-	(void)st;
+	const uint8_t *p = sampv;
+	size_t sz = aufmt_sample_size(fmt);
+	size_t psize = sampc * sz;
+
+	(void)aes;
 	(void)marker;
 
 	if (!buf || !len || !sampv)
 		return EINVAL;
 
-	if (sampsz == 0)
-		return ENOTSUP;
-
-	bytes = sampc * sampsz;
-	if (bytes > *len)
+	if (*len < psize)
 		return ENOMEM;
 
-	memcpy(buf, sampv, bytes);
-	*len = bytes;
+	*len = psize;
+
+	while (sampc--) {
+		/* raw format */
+		memcpy(buf, p, sz);
+
+		buf += sz;
+		p += sz;
+	}
 
 	return 0;
 }
 
 
-static int mock_raw_decode(struct audec_state *st,
-			   int fmt, void *sampv, size_t *sampc,
-			   bool marker, const uint8_t *buf, size_t len)
+static int decode(struct audec_state *ads, int fmt, void *sampv,
+		       size_t *sampc, bool marker,
+		       const uint8_t *buf, size_t len)
 {
-	const size_t sampsz = aufmt_sample_size(fmt);
-	(void)st;
+	uint8_t *p = sampv;
+	size_t sz = aufmt_sample_size(fmt);
+
+	(void)ads;
 	(void)marker;
 
-	if (!buf || !len || !sampv)
+	if (!sampv || !sampc || !buf || !len)
 		return EINVAL;
 
-	if (sampsz == 0)
-		return ENOTSUP;
-
-	if (len / sampsz > *sampc)
+	if (*sampc < len)
 		return ENOMEM;
 
-	memcpy(sampv, buf, len);
-	*sampc = len / sampsz;
+	*sampc = len/sz;
+
+	while (len) {
+		memcpy(p, buf, sz);
+		buf += sz;
+		p += sz;
+		len -= sz;
+	}
 
 	return 0;
 }
 
 
-static struct aucodec ac_dummy = {
-	.name = "RAW-CODEC",
-	.srate = 8000,
-	.crate = 8000,
-	.ch  = 1,
-	.pch = 1,
-	.ench = mock_raw_encode,
-	.dech = mock_raw_decode,
+static struct aucodec aucmock = {
+	.name  = "aucmock",
+	.srate = 48000,
+	.crate = 48000,
+	.ch    = 2,
+	.pch   = 2,
+	.ench  = encode,
+	.dech  = decode,
 };
 
 
-void mock_aucodec_register(struct list *aucodecl)
+void mock_aucodec_register(void)
 {
-	aucodec_register(aucodecl, &ac_dummy);
+	aucodec_register(baresip_aucodecl(), &aucmock);
 }
 
 
 void mock_aucodec_unregister(void)
 {
-	aucodec_unregister(&ac_dummy);
+	aucodec_unregister(&aucmock);
 }

@@ -1,7 +1,7 @@
 /**
  * @file g726.c G.726 Audio Codec
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -221,7 +221,7 @@ static int module_init(void)
 	struct list *aucodecl = baresip_aucodecl();
 	size_t i;
 
-	for (i=0; i<ARRAY_SIZE(g726); i++)
+	for (i=0; i<RE_ARRAY_SIZE(g726); i++)
 		aucodec_register(aucodecl, (struct aucodec *)&g726[i]);
 
 	return 0;
@@ -232,7 +232,7 @@ static int module_close(void)
 {
 	size_t i;
 
-	for (i=0; i<ARRAY_SIZE(g726); i++)
+	for (i=0; i<RE_ARRAY_SIZE(g726); i++)
 		aucodec_unregister((struct aucodec *)&g726[i]);
 
 	return 0;

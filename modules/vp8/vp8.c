@@ -1,7 +1,7 @@
 /**
  * @file vp8.c VP8 Video Codec
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -33,8 +33,9 @@ static struct vp8_vidcodec vp8 = {
 		.decupdh   = vp8_decode_update,
 		.dech      = vp8_decode,
 		.fmtp_ench = vp8_fmtp_enc,
+		.packetizeh = vp8_encode_packetize,
 	},
-	.max_fs   = 3600,
+	.max_fs   = 8100,  /* 1920 x 1080 / (16^2) */
 };
 
 

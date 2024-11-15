@@ -1,7 +1,7 @@
 /**
  * @file publish.c MQTT client -- publish
  *
- * Copyright (C) 2017 Creytiv.com
+ * Copyright (C) 2017 Alfred E. Heggestad
  */
 
 #include <mosquitto.h>
@@ -19,20 +19,28 @@
 /*
  * Relay UA events as publish messages to the Broker
  */
-static void ua_event_handler(struct ua *ua, enum ua_event ev,
-			     struct call *call, const char *prm, void *arg)
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
 	struct mqtt *mqtt = arg;
 	struct odict *od = NULL;
+	struct call *call = bevent_get_call(event);
 	int err;
 
 	err = odict_alloc(&od, 8);
 	if (err)
 		return;
 
-	err = event_encode_dict(od, ua, ev, call, prm);
+	err = odict_encode_bevent(od, event);
 	if (err)
 		goto out;
+
+	/* send audio jitter buffer values together with VU rx values. */
+	if (ev == UA_EVENT_VU_RX) {
+		err = event_add_au_jb_stat(od,call);
+		if (err) {
+			info("Could not add audio jb value.\n");
+		}
+	}
 
 	err = mqtt_publish_message(mqtt, mqtt->pubtopic, "%H",
 				   json_encode_odict, od);
@@ -88,15 +96,15 @@ int mqtt_publish_init(struct mqtt *mqtt)
 {
 	int err;
 
-	err = uag_event_register(ua_event_handler, mqtt);
+	err = bevent_register(event_handler, mqtt);
 	if (err)
 		return err;
 
-	return err;
+	return 0;
 }
 
 
 void mqtt_publish_close(void)
 {
-	uag_event_unregister(&ua_event_handler);
+	bevent_unregister(&event_handler);
 }

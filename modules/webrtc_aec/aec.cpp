@@ -1,16 +1,12 @@
 /**
  * @file aec.cpp  WebRTC Acoustic Echo Cancellation (AEC)
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
-#ifdef HAVE_PTHREAD
-#include <pthread.h>
-#endif
-#include "modules/audio_processing/aec/echo_cancellation.h"
 #include "aec.h"
 
 
@@ -18,6 +14,12 @@
  * @defgroup webrtc_aec webrtc_aec
  *
  * Acoustic Echo Cancellation (AEC) using WebRTC SDK.
+ *
+ * Configuration options:
+ *
+ \verbatim
+  webrtc_aec_extended_filter {yes,no} # Enable extended_filter
+ \endverbatim
  *
  * This code is experimental.
  *
@@ -29,13 +31,16 @@
 
 using namespace webrtc;
 
+static bool webrtc_aec_extended_filter;
 
 static void aec_destructor(void *arg)
 {
 	struct aec *st = (struct aec *)arg;
 
 	if (st->inst)
-		WebRtcAec_Free(st->inst);
+		delete st->inst;
+
+	mtx_destroy(&st->mutex);
 }
 
 
@@ -43,7 +48,7 @@ int webrtc_aec_alloc(struct aec **stp, void **ctx, struct aufilt_prm *prm)
 {
 	struct aec *aec;
 	int err = 0;
-	int r;
+	Config config;
 
 	if (!stp || !ctx || !prm)
 		return EINVAL;
@@ -72,48 +77,44 @@ int webrtc_aec_alloc(struct aec **stp, void **ctx, struct aufilt_prm *prm)
 		return ENOMEM;
 
 	aec->srate = prm->srate;
+	aec->ch    = prm->ch;
 
-	pthread_mutex_init(&aec->mutex, NULL);
+	err = mtx_init(&aec->mutex, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
+		goto out;
+	}
 
-	if (prm->srate > 8000)
-		aec->subframe_len = 160;
-	else
-		aec->subframe_len = 80;
-
-	if (prm->srate > 16000)
-		aec->num_bands = prm->srate / 16000;
-	else
-		aec->num_bands = 1;
+	// NOTE: excluding channel count
+	aec->blocksize  = prm->srate * BLOCKSIZE / 1000;
 
 	info("webrtc_aec: creating shared state:"
-	     " [%u Hz, %u channels, subframe %u samples, num_bands %d]\n",
-	     prm->srate, prm->ch, aec->subframe_len, aec->num_bands);
+	     " [%u Hz, %u channels, blocksize %u samples]\n",
+	     prm->srate, prm->ch, aec->blocksize);
 
-	aec->inst = WebRtcAec_Create();
+	aec->inst = AudioProcessing::Create();
 	if (!aec->inst) {
 		err = ENODEV;
 		goto out;
 	}
 
-	r = WebRtcAec_Init(aec->inst, prm->srate, prm->srate);
-	if (r != 0) {
-		err = ENODEV;
-		goto out;
+	// enable different filters here
+
+	aec->inst->echo_cancellation()->enable_drift_compensation(false);
+	aec->inst->echo_cancellation()->Enable(true);
+
+	aec->inst->echo_cancellation()->enable_metrics(true);
+	aec->inst->echo_cancellation()->enable_delay_logging(true);
+
+	aec->inst->gain_control()->Enable(true);
+
+	if (webrtc_aec_extended_filter) {
+		config.Set<webrtc::ExtendedFilter>(
+			new webrtc::ExtendedFilter(true)
+		);
 	}
 
-	WebRtcAec_enable_delay_agnostic(WebRtcAec_aec_core(aec->inst), 1);
-
-	aec->config.nlpMode       = kAecNlpModerate;
-	aec->config.skewMode      = kAecFalse;
-	aec->config.metricsMode   = kAecFalse;
-	aec->config.delay_logging = kAecFalse;
-
-	/* Sets local configuration modes. */
-	r = WebRtcAec_set_config(aec->inst, aec->config);
-	if (r != 0) {
-		err = ENODEV;
-		goto out;
-	}
+	aec->inst->SetExtraOptions(config);
 
  out:
 	if (err)
@@ -124,25 +125,6 @@ int webrtc_aec_alloc(struct aec **stp, void **ctx, struct aufilt_prm *prm)
 	}
 
 	return err;
-}
-
-
-void webrtc_aec_debug(const struct aec *aec)
-{
-	int median, std;
-	float frac_delay;
-
-	if (!aec)
-		return;
-
-	if (WebRtcAec_GetDelayMetrics(aec->inst,
-				      &median, &std,
-				      &frac_delay) == 0) {
-
-		info("webrtc_aec: delay metrics: median=%d, std=%d, "
-		     "fraction of poor delays=%f\n",
-		     median, std, frac_delay);
-	}
 }
 
 
@@ -158,6 +140,14 @@ static struct aufilt webrtc_aec = {
 static int module_init(void)
 {
 	aufilt_register(baresip_aufiltl(), &webrtc_aec);
+
+	struct conf *conf = conf_cur();
+	conf_get_bool(
+		conf,
+		"webrtc_aec_extended_filter",
+		&webrtc_aec_extended_filter
+	);
+
 	return 0;
 }
 

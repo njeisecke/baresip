@@ -21,8 +21,9 @@ selftest
 
 # Generated files
 src/static.c
-build*
+/build*
 *.pc
+re_trace.json
 
 # Backup files
 *~
@@ -30,3 +31,33 @@ build*
 *.old
 *.orig
 *.rej
+
+# ctags
+tags
+
+# Vim swp files
+*.swp
+
+# Window build folder
+Win32/*
+
+# Visual studio config
+mk/win32/baresip.vcxproj.user
+
+# clangd
+.cache
+compile_commands.json
+*.obj
+mk/win32/Debug/
+*.vcxproj.user
+
+speaker.wav
+
+# cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+packaging/Makefile
+install_manifest.txt
+
+# Visual Studio Code
+.vscode/*

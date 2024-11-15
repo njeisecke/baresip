@@ -1,7 +1,7 @@
 /**
  * @file presence.c Presence module
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <baresip.h>
@@ -9,13 +9,13 @@
 
 
 static int status_update(struct ua *current_ua,
-			 const enum presence_status new_status)
+			 enum presence_status new_status)
 {
 	if (ua_presence_status(current_ua) == new_status)
 		return 0;
 
 	info("presence: update status of '%s' from '%s' to '%s'\n",
-	     ua_aor(current_ua),
+	     account_aor(ua_account(current_ua)),
 	     contact_presence_str(ua_presence_status(current_ua)),
 	     contact_presence_str(new_status));
 
@@ -28,41 +28,42 @@ static int status_update(struct ua *current_ua,
 }
 
 
-static int cmd_online(struct re_printf *pf, void *arg)
+static int cmd_pres(struct re_printf *pf, void *arg)
 {
-	(void)pf;
-	(void)arg;
+	const struct cmd_arg *carg = arg;
+	enum presence_status new_status;
+	struct le *le;
 
-	return status_update(uag_current(), PRESENCE_OPEN);
-}
+	if (0 == str_casecmp(carg->prm, "online"))
+		new_status = PRESENCE_OPEN;
+	else if (0 == str_casecmp(carg->prm, "offline"))
+		new_status = PRESENCE_CLOSED;
+	else
+		return re_hprintf(pf, "usage: /presence online|offline\n");
 
+	for (le = list_head(uag_list()); le; le = le->next) {
+		struct ua *ua = le->data;
 
-static int cmd_offline(struct re_printf *pf, void *arg)
-{
-	(void)pf;
-	(void)arg;
+		status_update(ua, new_status);
+	}
 
-	return status_update(uag_current(), PRESENCE_CLOSED);
+	return 0;
 }
 
 
 static const struct cmd cmdv[] = {
-	{"presence_online",  '[', 0, "Set presence online",   cmd_online  },
-	{"presence_offline", ']', 0, "Set presence offline",  cmd_offline },
+	{"presence", 0, CMD_PRM, "Set presence <online|offline>", cmd_pres },
 };
 
 
-static void event_handler(struct ua *ua, enum ua_event ev,
-			  struct call *call, const char *prm, void *arg)
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
-	(void)call;
-	(void)prm;
 	(void)arg;
 
-	debug("presence: ua=%p got event %d (%s)\n", ua, ev,
-	      uag_event_str(ev));
-
 	if (ev == UA_EVENT_SHUTDOWN) {
+		struct ua *ua = bevent_get_ua(event);
+		debug("presence: ua=%p got event %d (%s)\n", ua, ev,
+		      uag_event_str(ev));
 
 		publisher_close();
 		notifier_close();
@@ -87,21 +88,21 @@ static int module_init(void)
 	if (err)
 		return err;
 
-	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
 	if (err)
 		return err;
 
-	err = uag_event_register(event_handler, NULL);
+	err = bevent_register(event_handler, NULL);
 	if (err)
 		return err;
 
-	return err;
+	return 0;
 }
 
 
 static int module_close(void)
 {
-	uag_event_unregister(event_handler);
+	bevent_unregister(event_handler);
 
 	cmd_unregister(baresip_commands(), cmdv);
 

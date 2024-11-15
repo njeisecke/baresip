@@ -1,7 +1,7 @@
 /**
  * @file vp9.c  VP9 video codec
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
@@ -25,7 +25,7 @@
  *
  *     http://www.webmproject.org/
  *
- *     draft-ietf-payload-vp9-07
+ *     draft-ietf-payload-vp9-16
  */
 
 
@@ -37,6 +37,7 @@ static struct vp9_vidcodec vp9 = {
 		.decupdh   = vp9_decode_update,
 		.dech      = vp9_decode,
 		.fmtp_ench = vp9_fmtp_enc,
+		.packetizeh = vp9_encode_packetize,
 	},
 	.max_fs = 3600
 };

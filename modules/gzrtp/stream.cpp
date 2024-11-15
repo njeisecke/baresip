@@ -1,10 +1,9 @@
 /**
  * @file stream.cpp  GNU ZRTP: Stream class implementation
  *
- * Copyright (C) 2010 - 2017 Creytiv.com
+ * Copyright (C) 2010 - 2017 Alfred E. Heggestad
  */
 #include <stdint.h>
-#include <pthread.h>
 
 #include <re.h>
 #include <baresip.h>
@@ -186,11 +185,8 @@ Stream::Stream(int& err, const ZRTPConfig& config, Session *session,
 	sa_init(&m_raddr, AF_INET);
 	tmr_init(&m_zrtp_timer);
 
-	pthread_mutexattr_t attr;
-	err  = pthread_mutexattr_init(&attr);
-	err |= pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-	err |= pthread_mutex_init(&m_zrtp_mutex, &attr);
-	err |= pthread_mutex_init(&m_send_mutex, &attr);
+	err |= mtx_init(&m_zrtp_mutex, mtx_plain) != thrd_success;
+	err |= mtx_init(&m_send_mutex, mtx_plain) != thrd_success;
 	if (err)
 		return;
 
@@ -235,17 +231,18 @@ Stream::Stream(int& err, const ZRTPConfig& config, Session *session,
 
 Stream::~Stream()
 {
+	mem_deref(m_uh_rtp);
+	mem_deref(m_uh_rtcp);
+
 	stop();
 
 	delete m_zrtp;
 
-	mem_deref(m_uh_rtp);
-	mem_deref(m_uh_rtcp);
 	mem_deref(m_rtpsock);
 	mem_deref(m_rtcpsock);
 
-	pthread_mutex_destroy(&m_zrtp_mutex);
-	pthread_mutex_destroy(&m_send_mutex);
+	mtx_destroy(&m_zrtp_mutex);
+	mtx_destroy(&m_send_mutex);
 
 	tmr_cancel(&m_zrtp_timer);
 }
@@ -307,10 +304,10 @@ void Stream::stop()
 
 	m_zrtp->stopZrtp();
 
-	pthread_mutex_lock(&m_send_mutex);
+	mtx_lock(&m_send_mutex);
 	delete m_send_srtp;
 	m_send_srtp = NULL;
-	pthread_mutex_unlock(&m_send_mutex);
+	mtx_unlock(&m_send_mutex);
 
 	delete m_recv_srtp;
 	m_recv_srtp = NULL;
@@ -321,7 +318,9 @@ void Stream::stop()
 
 int Stream::sdp_encode(struct sdp_media *sdpm)
 {
-	// TODO: signaling hash
+	(void)sdpm;
+
+	// NOTE: signaling hash
 	return 0;
 }
 
@@ -331,7 +330,7 @@ int Stream::sdp_decode(const struct sdp_media *sdpm)
 	if (sa_isset(sdp_media_raddr(sdpm), SA_ALL)) {
 		m_raddr = *sdp_media_raddr(sdpm);
 	}
-	// TODO: signaling hash
+	// NOTE: signaling hash
 
 	return 0;
 }
@@ -355,8 +354,9 @@ bool Stream::udp_helper_send(int *err, struct sa *src, struct mbuf *mb)
 	enum pkt_type ptype = get_packet_type(mb);
 	size_t len = mbuf_get_left(mb);
 	int rerr = 0;
+	(void)src;
 
-	pthread_mutex_lock(&m_send_mutex);
+	mtx_lock(&m_send_mutex);
 
 	if (ptype == PKT_TYPE_RTCP && m_send_srtp && len > 8) {
 
@@ -381,7 +381,7 @@ bool Stream::udp_helper_send(int *err, struct sa *src, struct mbuf *mb)
 	}
 
  out:
-	pthread_mutex_unlock(&m_send_mutex);
+	mtx_unlock(&m_send_mutex);
 
 	return ret;
 }
@@ -400,6 +400,8 @@ bool Stream::udp_helper_recv_cb(struct sa *src, struct mbuf *mb, void *arg)
 
 bool Stream::udp_helper_recv(struct sa *src, struct mbuf *mb)
 {
+	(void)src;
+
 	if (!started())
 		return false;
 
@@ -602,9 +604,9 @@ bool Stream::srtpSecretsReady(SrtpSecret_t* secrets, EnableSecurity part)
 	}
 
 	if (part == ForSender) {
-		pthread_mutex_lock(&m_send_mutex);
+		mtx_lock(&m_send_mutex);
 		m_send_srtp = s;
-		pthread_mutex_unlock(&m_send_mutex);
+		mtx_unlock(&m_send_mutex);
 	}
 	else if (part == ForReceiver)
 		m_recv_srtp = s;
@@ -622,10 +624,10 @@ void Stream::srtpSecretsOff(EnableSecurity part)
 	      (part == ForSender)? "sender" : "receiver");
 
 	if (part == ForSender) {
-		pthread_mutex_lock(&m_send_mutex);
+		mtx_lock(&m_send_mutex);
 		delete m_send_srtp;
 		m_send_srtp = NULL;
-		pthread_mutex_unlock(&m_send_mutex);
+		mtx_unlock(&m_send_mutex);
 	}
 
 	if (part == ForReceiver) {
@@ -639,6 +641,7 @@ void Stream::srtpSecretsOn(std::string c, std::string s, bool verified)
 {
 	m_sas = s;
 	m_ciphers = c;
+	char buf[128] = "";
 
 	if (s.empty()) {
 		info("zrtp: Stream <%s> is encrypted (%s)\n",
@@ -649,10 +652,24 @@ void Stream::srtpSecretsOn(std::string c, std::string s, bool verified)
 		     "SAS is [%s] (%s)\n",
 		     media_name(), c.c_str(), s.c_str(),
 		     (verified)? "verified" : "NOT VERIFIED");
-		if (!verified)
+		if (!verified) {
 			warning("zrtp: SAS is not verified, type "
 			        "'/zrtp_verify %d' to verify\n",
 			        m_session->id());
+			if (m_session->eventh) {
+				if (re_snprintf(buf, sizeof(buf), "%s,%d",
+						s.c_str(),
+						m_session->id()))
+					(m_session->eventh)
+						(MENC_EVENT_VERIFY_REQUEST,
+						 buf,
+						 NULL,
+						 m_session->arg);
+				else
+					warning("zrtp: failed to print verify"
+						" arguments\n");
+			}
+		}
 	}
 }
 
@@ -665,6 +682,8 @@ void Stream::handleGoClear()
 void Stream::zrtpNegotiationFailed(GnuZrtpCodes::MessageSeverity severity,
                                    int32_t subCode)
 {
+	(void)severity;
+	(void)subCode;
 }
 
 
@@ -675,33 +694,38 @@ void Stream::zrtpNotSuppOther()
 
 void Stream::synchEnter()
 {
-	pthread_mutex_lock(&m_zrtp_mutex);
+	mtx_lock(&m_zrtp_mutex);
 }
 
 
 void Stream::synchLeave()
 {
-	pthread_mutex_unlock(&m_zrtp_mutex);
+	mtx_unlock(&m_zrtp_mutex);
 }
 
 
 void Stream::zrtpAskEnrollment(GnuZrtpCodes::InfoEnrollment info)
 {
+	(void)info;
 }
 
 
 void Stream::zrtpInformEnrollment(GnuZrtpCodes::InfoEnrollment info)
 {
+	(void)info;
 }
 
 
 void Stream::signSAS(uint8_t* sasHash)
 {
+	(void)sasHash;
 }
 
 
 bool Stream::checkSASSignature(uint8_t* sasHash)
 {
+	(void)sasHash;
+
 	return true;
 }
 

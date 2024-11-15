@@ -1,7 +1,7 @@
 /**
  * @file baresip.c Top-level baresip struct
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
 #include <baresip.h>
@@ -49,9 +49,13 @@ static int cmd_quit(struct re_printf *pf, void *unused)
 static int insmod_handler(struct re_printf *pf, void *arg)
 {
        const struct cmd_arg *carg = arg;
+       char path[256];
        int err;
 
-       err = module_load(carg->prm);
+       if (conf_get_str(conf_cur(), "module_path", path, sizeof(path)))
+	       str_ncpy(path, ".", sizeof(path));
+
+       err = module_load(path, carg->prm);
        if (err) {
                return re_hprintf(pf, "insmod: ERROR: could not load module"
                                  " '%s': %m\n", carg->prm, err);
@@ -108,7 +112,7 @@ int baresip_init(struct config *cfg)
 	/* Initialise Network */
 	err = net_alloc(&baresip.net, &cfg->net);
 	if (err) {
-		warning("ua: network init failed: %m\n", err);
+		warning("baresip: network init failed: %m\n", err);
 		return err;
 	}
 
@@ -130,7 +134,7 @@ int baresip_init(struct config *cfg)
 		return err;
 	}
 
-	err = cmd_register(baresip.commands, corecmdv, ARRAY_SIZE(corecmdv));
+	err = cmd_register(baresip.commands, corecmdv,RE_ARRAY_SIZE(corecmdv));
 	if (err)
 		return err;
 

@@ -1,12 +1,11 @@
 /**
  * @file sndio.c  SndIO sound driver
  *
- * Copyright (C) 2014 Creytiv.com
+ * Copyright (C) 2014 Alfred E. Heggestad
  */
 #include <stdlib.h>
 #include <string.h>
 #include <sndio.h>
-#include <pthread.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -20,25 +19,25 @@
 
 
 struct ausrc_st {
-	const struct ausrc *as;  /* pointer to base-class */
 	struct sio_hdl *hdl;
-	pthread_t thread;
+	thrd_t thread;
 	int16_t *sampv;
 	size_t sampc;
 	int run;
 	ausrc_read_h *rh;
 	void *arg;
+	struct ausrc_prm prm;
 };
 
 struct auplay_st {
-	const struct auplay *ap;  /* pointer to base-class */
 	struct sio_hdl *hdl;
-	pthread_t thread;
+	thrd_t thread;
 	int16_t *sampv;
 	size_t sampc;
 	int run;
 	auplay_write_h *wh;
 	void *arg;
+	struct auplay_prm prm;
 };
 
 static struct ausrc *ausrc;
@@ -68,7 +67,7 @@ static struct sio_par *sndio_initpar(uint32_t srate, uint8_t ch)
 }
 
 
-static void *read_thread(void *arg)
+static int read_thread(void *arg)
 {
 	struct ausrc_st *st = arg;
 
@@ -78,31 +77,41 @@ static void *read_thread(void *arg)
 	}
 
 	while (st->run) {
+		struct auframe af;
 		size_t n = sio_read(st->hdl, st->sampv, st->sampc*2);
-		st->rh(st->sampv, n/2, st->arg);
+
+		auframe_init(&af, AUFMT_S16LE, st->sampv, n/2,
+			     st->prm.srate, st->prm.ch);
+
+		st->rh(&af, st->arg);
 	}
 
  out:
-	return NULL;
+	return 0;
 }
 
 
-static void *write_thread(void *arg)
+static int write_thread(void *arg)
 {
 	struct auplay_st *st = arg;
+	struct auframe af;
 
 	if (!sio_start(st->hdl)) {
 		warning("sndio: could not start playback\n");
 		goto out;
 	}
 
+	auframe_init(&af, AUFMT_S16LE, st->sampv, st->sampc, st->prm.srate,
+		     st->prm.ch);
+
 	while (st->run) {
-		st->wh(st->sampv, st->sampc, st->arg);
+		st->wh(&af, st->arg);
+
 		sio_write(st->hdl, st->sampv, st->sampc*2);
 	}
 
  out:
-	return NULL;
+	return 0;
 }
 
 
@@ -112,7 +121,7 @@ static void ausrc_destructor(void *arg)
 
 	if (st->run) {
 		st->run = false;
-		(void)pthread_join(st->thread, NULL);
+		(void)thrd_join(st->thread, NULL);
 	}
 
 	if (st->hdl)
@@ -128,7 +137,7 @@ static void auplay_destructor(void *arg)
 
 	if (st->run) {
 		st->run = false;
-		(void)pthread_join(st->thread, NULL);
+		(void)thrd_join(st->thread, NULL);
 	}
 
 	if (st->hdl)
@@ -139,7 +148,6 @@ static void auplay_destructor(void *arg)
 
 
 static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
-		     struct media_ctx **ctx,
 		     struct ausrc_prm *prm, const char *device,
 		     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
@@ -148,7 +156,6 @@ static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	int err;
 	const char *name;
 
-	(void)ctx;
 	(void)errh;
 
 	if (!stp || !as || !prm)
@@ -165,9 +172,9 @@ static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if ((st = mem_zalloc(sizeof(*st), ausrc_destructor)) == NULL)
 		return ENOMEM;
 
-	st->as  = as;
 	st->rh  = rh;
 	st->arg = arg;
+	st->prm = *prm;
 	st->hdl = sio_open(name, SIO_REC, 0);
 
 	if (!st->hdl) {
@@ -201,7 +208,7 @@ static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	}
 
 	st->run = true;
-	err = pthread_create(&st->thread, NULL, read_thread, st);
+	err = thread_create_name(&st->thread, "sndio_read", read_thread, st);
 	if (err)
 		st->run = false;
 
@@ -239,9 +246,9 @@ static int play_alloc(struct auplay_st **stp, const struct auplay *ap,
 	if ((st = mem_zalloc(sizeof(*st), auplay_destructor)) == NULL)
 		return ENOMEM;
 
-	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
+	st->prm = *prm;
 	st->hdl = sio_open(name, SIO_PLAY, 0);
 
 	if (!st->hdl) {
@@ -275,7 +282,7 @@ static int play_alloc(struct auplay_st **stp, const struct auplay *ap,
 	}
 
 	st->run = true;
-	err = pthread_create(&st->thread, NULL, write_thread, st);
+	err = thread_create_name(&st->thread, "sndio_write", write_thread, st);
 	if (err)
 		st->run = false;
 

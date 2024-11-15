@@ -1,16 +1,13 @@
 /**
  * @file encode.cpp  WebRTC Acoustic Echo Cancellation (AEC) -- Encode
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <string.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
-#ifdef HAVE_PTHREAD
-#include <pthread.h>
-#endif
 #include "aec.h"
 
 
@@ -21,8 +18,6 @@ struct aec_enc {
 	struct aufilt_enc_st af;  /* inheritance */
 
 	struct aec *aec;
-	float buf[160];
-	enum aufmt fmt;
 };
 
 
@@ -64,8 +59,6 @@ int webrtc_aec_encode_update(struct aufilt_enc_st **stp, void **ctx,
 	if (!st)
 		return ENOMEM;
 
-	st->fmt = (enum aufmt)prm->fmt;
-
 	err = webrtc_aec_alloc(&st->aec, ctx, prm);
 	if (err)
 		goto out;
@@ -80,75 +73,93 @@ int webrtc_aec_encode_update(struct aufilt_enc_st **stp, void **ctx,
 }
 
 
+static AudioProcessing::ChannelLayout get_layout(uint8_t ch)
+{
+	switch (ch) {
+
+	case 1: return AudioProcessing::kMono;
+	case 2: return AudioProcessing::kStereo;
+	default: return (AudioProcessing::ChannelLayout)-1;
+	}
+}
+
+
 static int encode_float(struct aec_enc *enc, float *sampv, size_t sampc)
 {
 	struct aec *aec = enc->aec;
-	const float *nearend = (const float *)sampv;
-	const float *in;
-	float *out;
-	float *rec = (float *)sampv;
 	size_t i;
 	int r;
 	int err = 0;
 
-	pthread_mutex_lock(&aec->mutex);
+	if (sampc % aec->blocksize)
+		return EINVAL;
 
-	for (i = 0; i < sampc; i += aec->subframe_len) {
+	mtx_lock(&aec->mutex);
 
-		in  = &nearend[i];
-		out = enc->buf;
+	for (i = 0; i < sampc; i += aec->blocksize) {
 
-		r = WebRtcAec_Process(aec->inst, &in, aec->num_bands,
-				      &out, aec->subframe_len,
-				      SOUND_CARD_BUF, 0);
+		size_t samples_per_channel = aec->blocksize / aec->ch;
+		const float *src = &sampv[i];
+		float *dest = &sampv[i];
+
+		// NOTE: important
+		aec->inst->set_stream_delay_ms(SOUND_CARD_BUF);
+
+		r = aec->inst->ProcessStream(&src,
+					     samples_per_channel,
+					     aec->srate,
+					     get_layout(aec->ch),
+					     aec->srate,
+					     get_layout(aec->ch),
+					     &dest);
 		if (r != 0) {
 			warning("webrtc_aec: encode:"
-				" WebRtcAec_Process error (%d)\n",
+				" ProcessStream error (%d)\n",
 				r);
 			err = EPROTO;
 			goto out;
 		}
-
-		memcpy(&rec[i], out, aec->subframe_len * sizeof(float));
 	}
 
  out:
-	pthread_mutex_unlock(&aec->mutex);
+	mtx_unlock(&aec->mutex);
 
 	return err;
 }
 
 
-int webrtc_aec_encode(struct aufilt_enc_st *st, void *sampv, size_t *sampc)
+int webrtc_aec_encode(struct aufilt_enc_st *st, struct auframe *af)
 {
 	struct aec_enc *enc = (struct aec_enc *)st;
 	float *flt;
 	int err = 0;
 
-	if (!st || !sampv || !sampc)
+	if (!st || !af)
 		return EINVAL;
 
-	switch (enc->fmt) {
+	switch (af->fmt) {
 
 	case AUFMT_S16LE:
 		/* convert from S16 to FLOAT */
-		flt = (float *)mem_alloc(*sampc * sizeof(float), NULL);
+		flt = (float *)mem_alloc(af->sampc * sizeof(float), NULL);
 		if (!flt)
 			return ENOMEM;
 
-		auconv_from_s16(AUFMT_FLOAT, flt, (int16_t *)sampv, *sampc);
+		auconv_from_s16(AUFMT_FLOAT, flt,
+				(int16_t *)af->sampv, af->sampc);
 
 		/* process */
-		err = encode_float(enc, flt, *sampc);
+		err = encode_float(enc, flt, af->sampc);
 
 		/* convert from FLOAT to S16 */
-		auconv_to_s16((int16_t *)sampv, AUFMT_FLOAT, flt, *sampc);
+		auconv_to_s16((int16_t *)af->sampv, AUFMT_FLOAT,
+			      flt, af->sampc);
 
 		mem_deref(flt);
 		break;
 
 	case AUFMT_FLOAT:
-		err = encode_float(enc, (float *)sampv, *sampc);
+		err = encode_float(enc, (float *)af->sampv, af->sampc);
 		break;
 
 	default:

@@ -1,29 +1,32 @@
 /**
- * @file pulse/recorder.c  Pulseaudio sound driver - recorder
+ * @file recorder.c  Pulseaudio sound driver - recorder (asynchronous API)
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2021 Commend.com - h.ramoser@commend.com
+ *                                  c.spielberger@commend.com
+ *                                  c.huber@commend.com
  */
+
 #include <pulse/pulseaudio.h>
-#include <pulse/simple.h>
-#include <pthread.h>
-#include <string.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
+#include <string.h>
+
 #include "pulse.h"
 
 
 struct ausrc_st {
-	const struct ausrc *as;      /* inheritance */
+	struct pastream_st *b;
 
-	pa_simple *s;
-	pthread_t thread;
-	bool run;
-	void *sampv;
-	size_t sampc;
-	size_t sampsz;
-	uint32_t ptime;
+	struct ausrc_prm src_prm;
 	ausrc_read_h *rh;
+	ausrc_error_h *errh;
+
+	void   *sampv;
+	size_t  sampsz;
+	size_t  sampc;
+	uint64_t samps;
+
 	void *arg;
 };
 
@@ -32,159 +35,64 @@ static void ausrc_destructor(void *arg)
 {
 	struct ausrc_st *st = arg;
 
-	/* Wait for termination of other thread */
-	if (st->run) {
-		debug("pulse: stopping record thread\n");
-		st->run = false;
-		(void)pthread_join(st->thread, NULL);
-	}
-
-	if (st->s)
-		pa_simple_free(st->s);
-
+	mem_deref(st->b);
 	mem_deref(st->sampv);
-}
-
-
-static void *read_thread(void *arg)
-{
-	struct ausrc_st *st = arg;
-	const size_t num_bytes = st->sampc * st->sampsz;
-	int ret, pa_error = 0;
-	uint64_t now, last_read, diff;
-	unsigned dropped = 0;
-	bool init = true;
-
-	if (pa_simple_flush(st->s, &pa_error)) {
-		warning("pulse: pa_simple_flush error (%s)\n",
-		        pa_strerror(pa_error));
-	}
-
-	last_read = tmr_jiffies();
-
-	while (st->run) {
-
-		ret = pa_simple_read(st->s, st->sampv, num_bytes, &pa_error);
-		if (ret < 0) {
-			warning("pulse: pa_simple_read error (%s)\n",
-				pa_strerror(pa_error));
-			continue;
-		}
-
-		/* Some devices might send a burst of samples right after the
-		   initialization - filter them out */
-		if (init) {
-			now = tmr_jiffies();
-			diff = (now > last_read)? now - last_read : 0;
-
-			if (diff < st->ptime / 2) {
-				last_read = now;
-				++dropped;
-				continue;
-			}
-			else {
-				init = false;
-
-				if (dropped)
-					debug("pulse: dropped %u frames of "
-					      "garbage at the beginning of "
-					      "the recording\n", dropped);
-			}
-		}
-
-		st->rh(st->sampv, st->sampc, st->arg);
-	}
-
-	return NULL;
-}
-
-
-static int aufmt_to_pulse_format(enum aufmt fmt)
-{
-	switch (fmt) {
-
-	case AUFMT_S16LE:  return PA_SAMPLE_S16NE;
-	case AUFMT_FLOAT:  return PA_SAMPLE_FLOAT32NE;
-	default: return 0;
-	}
+	st->rh = NULL;
+	st->errh = NULL;
 }
 
 
 int pulse_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
-			 struct media_ctx **ctx,
-			 struct ausrc_prm *prm, const char *device,
-			 ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
+	struct ausrc_prm *prm, const char *dev, ausrc_read_h *rh,
+	ausrc_error_h *errh, void *arg)
 {
 	struct ausrc_st *st;
-	pa_sample_spec ss;
-	pa_buffer_attr attr;
-	int pa_error;
-	int err;
+	int err = 0;
 
-	(void)ctx;
-	(void)device;
-	(void)errh;
-
-	if (!stp || !as || !prm)
+	if (!stp || !as || !prm || !rh)
 		return EINVAL;
 
-	debug("pulse: opening recorder (%u Hz, %d channels, device '%s')\n",
-	      prm->srate, prm->ch, device);
+	info ("pulse: opening recorder(%u Hz, %d channels,"
+	      "device '%s')\n", prm->srate, prm->ch, dev);
 
 	st = mem_zalloc(sizeof(*st), ausrc_destructor);
 	if (!st)
 		return ENOMEM;
 
-	st->as  = as;
-	st->rh  = rh;
-	st->arg = arg;
+	st->src_prm.srate = prm->srate;
+	st->src_prm.ch    = prm->ch;
+	st->src_prm.ptime = prm->ptime;
+	st->src_prm.fmt   = prm->fmt;
 
-	st->sampc = prm->srate * prm->ch * prm->ptime / 1000;
 	st->sampsz = aufmt_sample_size(prm->fmt);
-	st->ptime = prm->ptime;
-
-	st->sampv = mem_alloc(st->sampsz * st->sampc, NULL);
+	st->sampc  = prm->ptime * prm->ch * prm->srate / 1000;
+	st->samps  = 0;
+	st->sampv  = mem_zalloc(st->sampsz * st->sampc, NULL);
 	if (!st->sampv) {
 		err = ENOMEM;
 		goto out;
 	}
 
-	ss.format   = aufmt_to_pulse_format(prm->fmt);
-	ss.channels = prm->ch;
-	ss.rate     = prm->srate;
+	st->rh   = rh;
+	st->errh = errh;
+	st->arg  = arg;
 
-	attr.maxlength = (uint32_t)-1;
-	attr.tlength   = (uint32_t)-1;
-	attr.prebuf    = (uint32_t)-1;
-	attr.minreq    = (uint32_t)-1;
-	attr.fragsize  = (uint32_t)pa_usec_to_bytes(prm->ptime * 1000, &ss);
+	err = pastream_alloc(&st->b, dev, "Baresip", "VoIP Recorder",
+		PA_STREAM_RECORD, prm->srate, prm->ch, prm->ptime, prm->fmt);
+	if (err)
+		goto out;
 
-	st->s = pa_simple_new(NULL,
-			      "Baresip",
-			      PA_STREAM_RECORD,
-			      str_isset(device) ? device : NULL,
-			      "VoIP Record",
-			      &ss,
-			      NULL,
-			      &attr,
-			      &pa_error);
-	if (!st->s) {
-		warning("pulse: could not connect to server (%s)\n",
-			pa_strerror(pa_error));
+	err = pastream_start(st->b, st);
+	if (err) {
+		warning("pulse: could not connect record stream %s "
+			"(%m)\n", st->b->sname, err);
 		err = ENODEV;
 		goto out;
 	}
 
-	st->run = true;
-	err = pthread_create(&st->thread, NULL, read_thread, st);
-	if (err) {
-		st->run = false;
-		goto out;
-	}
+	info ("pulse: record stream %s started\n", st->b->sname);
 
-	debug("pulse: recording started\n");
-
- out:
+  out:
 	if (err)
 		mem_deref(st);
 	else
@@ -194,44 +102,106 @@ int pulse_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 }
 
 
-static void dev_list_cb(pa_context *c, const pa_source_info *l,
-						int eol, void *userdata)
+static void dev_list_cb(pa_context *context, const pa_source_info *l, int eol,
+			void *arg)
 {
-	struct list *dev_list = userdata;
+	struct list *dev_list = arg;
 	int err;
-	(void)c;
+	(void)context;
 
-	if (eol > 0) {
+	if (eol > 0)
 		return;
-	}
 
-	/* In pulseaudio every sink automatically has a monitor source
-	   This "output" device must be filtered out */
-	if (!strstr(l->name,"output")) {
-		err = mediadev_add(dev_list, l->name);
-		if (err) {
-			warning("pulse recorder: media device (%s) "
-					"can not be added\n",l->name);
-		}
-	}
+	if (strstr(l->name, "output"))
+		return;
+
+	err = mediadev_add(dev_list, l->name);
+	if (err)
+		warning("pulse: record device %s could not be added\n",
+			l->name);
 }
 
 
-static pa_operation *get_dev_info(pa_context *pa_ctx, struct list *dev_list){
-
-	return pa_context_get_source_info_list(pa_ctx, dev_list_cb,
-						dev_list);
+static pa_operation *get_dev_info(pa_context *context, struct list *dev_list)
+{
+	return pa_context_get_source_info_list(context, dev_list_cb, dev_list);
 }
 
 
 int pulse_recorder_init(struct ausrc *as)
 {
-	if (!as) {
+	if (!as)
 		return EINVAL;
-	}
 
 	list_init(&as->dev_list);
-
-	return set_available_devices(&as->dev_list, get_dev_info);
+	return pulse_set_available_devices(&as->dev_list, get_dev_info);
 }
 
+
+/**
+ * Source read callback function which gets called by pulseaudio
+ *
+ * @param s   Pulseaudio stream object
+ * @param len Number of bytes to read (not used)
+ * @param arg Argument (ausrc_st object)
+ */
+void stream_read_cb(pa_stream *s, size_t len, void *arg)
+{
+	struct ausrc_st *st = arg;
+	struct paconn_st *c = paconn_get();
+	struct auframe af;
+
+	int pa_err = 0;
+	size_t sampc = 0;
+	size_t idx = 0;
+	const void *pabuf = NULL;
+	size_t rlen = 0;
+
+	(void) len;
+
+	if (st->b->shutdown)
+		goto out;
+
+	while (pa_stream_readable_size(s) > 0) {
+		pa_err = pa_stream_peek(s, &pabuf, &rlen);
+		if (pa_err < 0) {
+			warning ("pulse: %s pa_stream_peek error (%s)\n",
+				st->b->sname, pa_strerror(pa_err));
+			goto out;
+		}
+
+		if (!rlen)
+			goto out;
+
+		sampc += rlen / st->sampsz;
+		if (sampc > st->sampc) {
+			st->sampv = mem_realloc(st->sampv, st->sampsz * sampc);
+			st->sampc = sampc;
+		}
+
+		if (!st->sampv) {
+			pa_stream_drop(s);
+			continue;
+		}
+
+		if (pabuf)
+			memcpy((uint8_t *) st->sampv + idx, pabuf, rlen);
+		else
+			memset((uint8_t *) st->sampv + idx, 0, rlen);
+
+		idx += rlen;
+		pa_stream_drop(s);
+
+	}
+
+	auframe_init(&af, st->src_prm.fmt, st->sampv, sampc,
+		st->src_prm.srate, st->src_prm.ch);
+
+	af.timestamp = st->samps * AUDIO_TIMEBASE /
+		       (st->src_prm.srate * st->src_prm.ch);
+	st->samps += sampc;
+	st->rh(&af, st->arg);
+
+out:
+	pa_threaded_mainloop_signal(c->mainloop, 0);
+}

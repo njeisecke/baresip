@@ -1,7 +1,7 @@
 /**
  * @file stream.h  GNU ZRTP: Stream class
  *
- * Copyright (C) 2010 - 2017 Creytiv.com
+ * Copyright (C) 2010 - 2017 Alfred E. Heggestad
  */
 #ifndef __STREAM_H
 #define __STREAM_H
@@ -78,6 +78,8 @@ public:
 	bool sas_verified();
 	void verify_sas(bool verify);
 
+	Session *session() { return m_session; }
+
 private:
 	static void zrtp_timer_cb(void *arg);
 	static bool udp_helper_send_cb(int *err, struct sa *src,
@@ -96,7 +98,7 @@ private:
 	ZRtp *m_zrtp;
 	bool m_started;
 	struct tmr m_zrtp_timer;
-	pthread_mutex_t m_zrtp_mutex;
+	mtx_t m_zrtp_mutex;
 	uint16_t m_zrtp_seq;
 	uint32_t m_local_ssrc, m_peer_ssrc;
 	struct sa m_raddr;
@@ -105,7 +107,7 @@ private:
 	struct udp_helper *m_uh_rtcp;
 	StreamMediaType m_media_type;
 	Srtp *m_send_srtp, *m_recv_srtp;
-	pthread_mutex_t m_send_mutex;
+	mtx_t m_send_mutex;
 	SRTPStat m_srtp_stat, m_srtcp_stat;
 	std::string m_sas, m_ciphers;
 

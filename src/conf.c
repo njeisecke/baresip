@@ -1,7 +1,7 @@
 /**
  * @file conf.c  Configuration utils
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #define _DEFAULT_SOURCE 1
 #define _BSD_SOURCE 1
@@ -14,6 +14,7 @@
 #ifdef HAVE_IO_H
 #include <io.h>
 #endif
+#include <string.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -39,32 +40,8 @@
 #endif
 
 
-static const char *conf_path = NULL;
+static char *conf_path = NULL;
 static struct conf *conf_obj;
-
-
-/**
- * Check if a file exists
- *
- * @param path Filename
- *
- * @return True if exist, False if not
- */
-bool conf_fileexist(const char *path)
-{
-	struct stat st;
-
-	if (!path)
-		 return false;
-
-	if (stat(path, &st) < 0)
-		 return false;
-
-	if ((st.st_mode & S_IFMT) != S_IFREG)
-		 return false;
-
-	return true;
-}
 
 
 static void print_populated(const char *what, uint32_t n)
@@ -73,20 +50,15 @@ static void print_populated(const char *what, uint32_t n)
 }
 
 
-/**
- * Parse a config file, calling handler for each line
- *
- * @param filename Config file
- * @param ch       Line handler
- * @param arg      Handler argument
- *
- * @return 0 if success, otherwise errorcode
- */
-int conf_parse(const char *filename, confline_h *ch, void *arg)
+int conf_loadfile(struct mbuf **mbp, const char *filename)
 {
-	struct pl pl, val;
 	struct mbuf *mb;
-	int err = 0, fd = open(filename, O_RDONLY);
+	int fd, err = 0;
+
+	if (!mbp || !filename)
+		return EINVAL;
+
+	fd = open(filename, O_RDONLY);
 	if (fd < 0)
 		return errno;
 
@@ -110,6 +82,41 @@ int conf_parse(const char *filename, confline_h *ch, void *arg)
 		err |= mbuf_write_mem(mb, buf, n);
 	}
 
+	mb->pos = 0;
+
+ out:
+	close(fd);
+	if (err)
+		mem_deref(mb);
+	else
+		*mbp = mb;
+
+	return err;
+}
+
+
+/**
+ * Parse a config file, calling handler for each line
+ *
+ * @param filename Config file
+ * @param ch       Line handler
+ * @param arg      Handler argument
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int conf_parse(const char *filename, confline_h *ch, void *arg)
+{
+	struct pl pl, val;
+	struct mbuf *mb = NULL;
+	int err;
+
+	err = conf_loadfile(&mb, filename);
+	if (err)
+		return err;
+
+	if (!mb)
+		return EINVAL;
+
 	pl.p = (const char *)mb->buf;
 	pl.l = mb->end;
 
@@ -126,9 +133,7 @@ int conf_parse(const char *filename, confline_h *ch, void *arg)
 		err = ch(&val, arg);
 	}
 
- out:
 	mem_deref(mb);
-	(void)close(fd);
 
 	return err;
 }
@@ -138,10 +143,13 @@ int conf_parse(const char *filename, confline_h *ch, void *arg)
  * Set the path to configuration files
  *
  * @param path Configuration path
+ *
+ * @return 0 if success, otherwise errorcode
  */
-void conf_path_set(const char *path)
+int conf_path_set(const char *path)
 {
-	conf_path = path;
+	mem_deref(conf_path);
+	return str_dup(&conf_path, path);
 }
 
 
@@ -257,6 +265,9 @@ int conf_get_vidsz(const struct conf *conf, const char *name, struct vidsz *sz)
 	struct pl r, w, h;
 	int err;
 
+	if (!sz)
+		return EINVAL;
+
 	err = conf_get(conf, name, &r);
 	if (err)
 		return err;
@@ -307,21 +318,24 @@ int conf_get_sa(const struct conf *conf, const char *name, struct sa *sa)
 }
 
 
-int conf_get_float(const struct conf *conf, const char *name, double *val)
+enum jbuf_type conf_get_jbuf_type(const struct pl *pl)
 {
-	struct pl opt;
-	int err;
+	if (0 == pl_strcasecmp(pl, "off"))      return JBUF_OFF;
+	if (0 == pl_strcasecmp(pl, "fixed"))    return JBUF_FIXED;
+	if (0 == pl_strcasecmp(pl, "adaptive")) return JBUF_ADAPTIVE;
 
-	if (!conf || !name || !val)
-		return EINVAL;
+	warning("unsupported jitter buffer type (%r)\n", pl);
+	return JBUF_FIXED;
+}
 
-	err = conf_get(conf, name, &opt);
-	if (err)
-		return err;
 
-	*val = pl_float(&opt);
+bool conf_aubuf_adaptive(const struct pl *pl)
+{
+	if (0 == pl_strcasecmp(pl, "fixed"))    return false;
+	if (0 == pl_strcasecmp(pl, "adaptive")) return true;
 
-	return 0;
+	warning("unsupported audio buffer mode (%r)\n", pl);
+	return false;
 }
 
 
@@ -348,7 +362,7 @@ int conf_configure(void)
 	if (re_snprintf(file, sizeof(file), "%s/config", path) < 0)
 		return ENOMEM;
 
-	if (!conf_fileexist(file)) {
+	if (!fs_isfile(file)) {
 
 		(void)fs_mkdir(path, 0700);
 
@@ -368,6 +382,35 @@ int conf_configure(void)
 
  out:
 	return err;
+}
+
+
+/**
+ * Configure the system from a buffer
+ *
+ * @param buf Buffer with config
+ * @param sz  Size of buffer
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int conf_configure_buf(const uint8_t *buf, size_t sz)
+{
+	int err;
+
+	if (!buf || !sz)
+		return EINVAL;
+
+	conf_obj = mem_deref(conf_obj);
+
+	err = conf_alloc_buf(&conf_obj, buf, sz);
+	if (err)
+		return err;
+
+	err = config_parse_conf(conf_config(), conf_obj);
+	if (err)
+		return err;
+
+	return 0;
 }
 
 
@@ -420,4 +463,20 @@ struct conf *conf_cur(void)
 void conf_close(void)
 {
 	conf_obj = mem_deref(conf_obj);
+	conf_path = mem_deref(conf_path);
+}
+
+
+const char *fs_file_extension(const char *filename)
+{
+	const char *p;
+
+	if (!filename)
+		return NULL;
+
+	p = strrchr(filename, '.');
+	if (!p)
+		return NULL;
+
+	return p + 1;
 }

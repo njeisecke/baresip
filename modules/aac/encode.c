@@ -1,7 +1,7 @@
 /**
  * @file aac/encode.c MPEG-4 AAC Encoder
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  * Copyright (C) 2019 Hessischer Rundfunk
  */
 
@@ -63,7 +63,7 @@ static void hdr_encode(uint8_t *p, uint16_t size)
 	 * size
 	 */
 	*(uint16_t *)(void *)&p[2] =
-	    htons(size << ((sizeof(uint16_t) * 8) - SIZELENGTH));
+	    htons(size << ((sizeof(uint16_t) * 8) - AAC_SIZELENGTH));
 }
 
 

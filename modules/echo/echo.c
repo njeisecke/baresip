@@ -74,7 +74,7 @@ static int new_session(struct ua *ua, struct call *call)
 
 	sess->call_in = call;
 
-	re_snprintf(a, sizeof(a), "A-%x", sess);
+	re_snprintf(a, sizeof(a), "A-%p", sess);
 
 	audio_set_devicename(call_audio(sess->call_in), a, a);
 	video_set_devicename(call_video(sess->call_in), a, a);
@@ -83,7 +83,7 @@ static int new_session(struct ua *ua, struct call *call)
 			call_dtmf_handler, sess);
 
 	list_append(&sessionl, &sess->le, sess);
-	err = ua_answer(ua, call);
+	err = ua_answer(ua, call, VIDMODE_ON);
 
 	if (err)
 		mem_deref(sess);
@@ -92,23 +92,23 @@ static int new_session(struct ua *ua, struct call *call)
 }
 
 
-static void ua_event_handler(struct ua *ua, enum ua_event ev,
-		struct call *call, const char *prm, void *arg)
+static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
 {
 	int err;
-	(void)prm;
+	struct ua   *ua   = bevent_get_ua(event);
+	struct call *call = bevent_get_call(event);
 	(void)arg;
 
 	switch (ev) {
 
 	case UA_EVENT_CALL_INCOMING:
-		debug("echo: CALL_INCOMING: peer=%s  -->  local=%s\n",
+		info("echo: CALL_INCOMING: peer=%s  -->  local=%s\n",
 				call_peeruri(call),
 				call_localuri(call));
 
 		err = new_session(ua, call);
 		if (err) {
-			ua_hangup(ua, call, 500, "Server Error");
+			call_hangup(call, 500, "Server Error");
 		}
 		break;
 
@@ -124,7 +124,7 @@ static int module_init(void)
 
 	list_init(&sessionl);
 
-	err = uag_event_register(ua_event_handler, 0);
+	err = bevent_register(event_handler, 0);
 	if (err)
 		return err;
 
@@ -144,7 +144,7 @@ static int module_close(void)
 		list_flush(&sessionl);
 	}
 
-	uag_event_unregister(ua_event_handler);
+	bevent_unregister(event_handler);
 
 	return 0;
 }

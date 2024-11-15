@@ -1,7 +1,7 @@
 /**
  * @file v4l2.c  Video4Linux2 video-source
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #define _DEFAULT_SOURCE 1
 #define _BSD_SOURCE 1
@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #undef __STRICT_ANSI__ /* needed for RHEL4 kernel 2.6.9 */
-#include <pthread.h>
+#include <re_atomic.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -50,11 +50,9 @@ struct buffer {
 };
 
 struct vidsrc_st {
-	const struct vidsrc *vs;  /* inheritance */
-
 	int fd;
-	pthread_t thread;
-	bool run;
+	thrd_t thread;
+	RE_ATOMIC bool run;
 	struct vidsz sz;
 	u_int32_t pixfmt;
 	struct buffer *buffers;
@@ -75,8 +73,6 @@ static enum vidfmt match_fmt(u_int32_t fmt)
 	case V4L2_PIX_FMT_YUYV:   return VID_FMT_YUYV422;
 	case V4L2_PIX_FMT_UYVY:   return VID_FMT_UYVY422;
 	case V4L2_PIX_FMT_RGB32:  return VID_FMT_RGB32;
-	case V4L2_PIX_FMT_RGB565: return VID_FMT_RGB565;
-	case V4L2_PIX_FMT_RGB555: return VID_FMT_RGB555;
 	case V4L2_PIX_FMT_NV12:   return VID_FMT_NV12;
 	case V4L2_PIX_FMT_NV21:   return VID_FMT_NV21;
 	default:                  return VID_FMT_N;
@@ -453,9 +449,10 @@ static void destructor(void *arg)
 
 	debug("v4l2: stopping video source..\n");
 
-	if (st->run) {
-		st->run = false;
-		pthread_join(st->thread, NULL);
+	if (re_atomic_rlx(&st->run)) {
+		debug("v4l2: stopping read thread\n");
+		re_atomic_rlx_set(&st->run, false);
+		thrd_join(st->thread, NULL);
 	}
 
 	stop_capturing(st);
@@ -466,35 +463,36 @@ static void destructor(void *arg)
 }
 
 
-static void *read_thread(void *arg)
+static int read_thread(void *arg)
 {
 	struct vidsrc_st *st = arg;
 	int err;
 
-	while (st->run) {
+	while (re_atomic_rlx(&st->run)) {
 		err = read_frame(st);
 		if (err) {
 			warning("v4l2: read_frame: %m\n", err);
 		}
 	}
 
-	return NULL;
+	return 0;
 }
 
 
 static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
-		 struct media_ctx **ctx, struct vidsrc_prm *prm,
+		 struct vidsrc_prm *prm,
 		 const struct vidsz *size, const char *fmt,
 		 const char *dev, vidsrc_frame_h *frameh,
+		 vidsrc_packet_h  *packeth,
 		 vidsrc_error_h *errorh, void *arg)
 {
 	struct vidsrc_st *st;
 	struct mediadev *md;
 	int err;
 
-	(void)ctx;
 	(void)prm;
 	(void)fmt;
+	(void)packeth;
 	(void)errorh;
 
 	if (!stp || !size || !frameh)
@@ -515,7 +513,6 @@ static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 	if (!st)
 		return ENOMEM;
 
-	st->vs = vs;
 	st->fd = -1;
 	st->sz = *size;
 	st->frameh = frameh;
@@ -538,10 +535,10 @@ static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 	if (err)
 		goto out;
 
-	st->run = true;
-	err = pthread_create(&st->thread, NULL, read_thread, st);
+	re_atomic_rlx_set(&st->run, true);
+	err = thread_create_name(&st->thread, "v4l2", read_thread, st);
 	if (err) {
-		st->run = false;
+		re_atomic_rlx_set(&st->run, false);
 		goto out;
 	}
 

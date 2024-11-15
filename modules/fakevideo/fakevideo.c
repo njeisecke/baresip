@@ -1,12 +1,14 @@
 /**
  * @file fakevideo.c Fake video source and video display
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #define _DEFAULT_SOURCE 1
 #define _BSD_SOURCE 1
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#include <pthread.h>
+#endif
+#include <re_atomic.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -29,14 +31,9 @@
 
 
 struct vidsrc_st {
-	const struct vidsrc *vs;  /* inheritance */
 	struct vidframe *frame;
-#ifdef HAVE_PTHREAD
-	pthread_t thread;
-	bool run;
-#else
-	struct tmr tmr;
-#endif
+	thrd_t thread;
+	RE_ATOMIC bool run;
 	uint64_t ts;
 	double fps;
 	vidsrc_frame_h *frameh;
@@ -44,7 +41,7 @@ struct vidsrc_st {
 };
 
 struct vidisp_st {
-	const struct vidisp *vd;  /* inheritance */
+	int dummy;
 };
 
 
@@ -60,14 +57,13 @@ static void process_frame(struct vidsrc_st *st)
 }
 
 
-#ifdef HAVE_PTHREAD
-static void *read_thread(void *arg)
+static int read_thread(void *arg)
 {
 	struct vidsrc_st *st = arg;
 
 	st->ts = tmr_jiffies_usec();
 
-	while (st->run) {
+	while (re_atomic_rlx(&st->run)) {
 
 		if (tmr_jiffies_usec() < st->ts) {
 			sys_msleep(4);
@@ -77,38 +73,20 @@ static void *read_thread(void *arg)
 		process_frame(st);
 	}
 
-	return NULL;
+	return 0;
 }
-#else
-static void tmr_handler(void *arg)
-{
-	struct vidsrc_st *st = arg;
-	const uint64_t now = tmr_jiffies_usec();
-
-	tmr_start(&st->tmr, 4, tmr_handler, st);
-
-	if (!st->ts)
-		st->ts = now;
-
-	if (now >= st->ts) {
-		process_frame(st);
-	}
-}
-#endif
 
 
 static void src_destructor(void *arg)
 {
 	struct vidsrc_st *st = arg;
 
-#ifdef HAVE_PTHREAD
-	if (st->run) {
-		st->run = false;
-		pthread_join(st->thread, NULL);
+	/* Wait for termination of other thread */
+	if (re_atomic_rlx(&st->run)) {
+		debug("fakevideo: stopping read thread\n");
+		re_atomic_rlx_set(&st->run, false);
+		thrd_join(st->thread, NULL);
 	}
-#else
-	tmr_cancel(&st->tmr);
-#endif
 
 	mem_deref(st->frame);
 }
@@ -122,19 +100,21 @@ static void disp_destructor(void *arg)
 
 
 static int src_alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
-		     struct media_ctx **ctx, struct vidsrc_prm *prm,
+		     struct vidsrc_prm *prm,
 		     const struct vidsz *size, const char *fmt,
 		     const char *dev, vidsrc_frame_h *frameh,
+		     vidsrc_packet_h *packeth,
 		     vidsrc_error_h *errorh, void *arg)
 {
 	struct vidsrc_st *st;
 	unsigned x;
 	int err;
 
-	(void)ctx;
 	(void)fmt;
 	(void)dev;
+	(void)packeth;
 	(void)errorh;
+	(void)vs;
 
 	if (!stp || !prm || !size || !frameh)
 		return EINVAL;
@@ -143,7 +123,6 @@ static int src_alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 	if (!st)
 		return ENOMEM;
 
-	st->vs     = vs;
 	st->fps    = prm->fps;
 	st->frameh = frameh;
 	st->arg    = arg;
@@ -167,16 +146,12 @@ static int src_alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 		vidframe_draw_vline(st->frame, x, 0, size->h, r, g, b);
 	}
 
-#ifdef HAVE_PTHREAD
-	st->run = true;
-	err = pthread_create(&st->thread, NULL, read_thread, st);
+	re_atomic_rlx_set(&st->run, true);
+	err = thread_create_name(&st->thread, "fakevideo", read_thread, st);
 	if (err) {
-		st->run = false;
+		re_atomic_rlx_set(&st->run, false);
 		goto out;
 	}
-#else
-	tmr_start(&st->tmr, 1, tmr_handler, st);
-#endif
 
  out:
 	if (err)
@@ -204,8 +179,6 @@ static int disp_alloc(struct vidisp_st **stp, const struct vidisp *vd,
 	st = mem_zalloc(sizeof(*st), disp_destructor);
 	if (!st)
 		return ENOMEM;
-
-	st->vd = vd;
 
 	*stp = st;
 

@@ -1,11 +1,8 @@
 /**
  * @file src/main.c  Main application code
  *
- * Copyright (C) 2010 - 2015 Creytiv.com
+ * Copyright (C) 2010 - 2021 Alfred E. Heggestad
  */
-#ifdef SOLARIS
-#define __EXTENSIONS__ 1
-#endif
 #include <stdlib.h>
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -16,12 +13,18 @@
 #include <re.h>
 #include <baresip.h>
 
+#define DEBUG_MODULE ""
+#define DEBUG_LEVEL 0
+#include <re_dbg.h>
+
+enum { ASYNC_WORKERS = 4 };
 
 static void signal_handler(int sig)
 {
 	static bool term = false;
 
 	if (term) {
+		module_app_unload();
 		mod_close();
 		exit(0);
 	}
@@ -31,17 +34,6 @@ static void signal_handler(int sig)
 	info("terminated by signal %d\n", sig);
 
 	ua_stop_all(false);
-}
-
-
-static void net_change_handler(void *arg)
-{
-	(void)arg;
-
-	info("IP-address changed: %j\n",
-	     net_laddr_af(baresip_network(), AF_INET));
-
-	(void)uag_reset_transp(true, true);
 }
 
 
@@ -63,15 +55,15 @@ static void tmr_quit_handler(void *arg)
 }
 
 
+#ifdef HAVE_GETOPT
 static void usage(void)
 {
 	(void)re_fprintf(stderr,
 			 "Usage: baresip [options]\n"
 			 "options:\n"
 			 "\t-4               Force IPv4 only\n"
-#if HAVE_INET6
 			 "\t-6               Force IPv6 only\n"
-#endif
+			 "\t-a <software>    Specify SIP User-Agent string\n"
 			 "\t-d               Daemon\n"
 			 "\t-e <commands>    Execute commands (repeat)\n"
 			 "\t-f <path>        Config path\n"
@@ -83,14 +75,19 @@ static void usage(void)
 			 "\t-n <net_if>      Specify network interface\n"
 			 "\t-u <parameters>  Extra UA parameters\n"
 			 "\t-v               Verbose debug\n"
+			 "\t-T               Enable timestamps log\n"
+			 "\t-c               Disable colored log\n"
 			 );
 }
+#endif
 
 
 int main(int argc, char *argv[])
 {
 	int af = AF_UNSPEC, run_daemon = false;
 	const char *ua_eprm = NULL;
+	const char *software =
+		"baresip v" BARESIP_VERSION " (" ARCH "/" OS ")";
 	const char *execmdv[16];
 	const char *net_interface = NULL;
 	const char *audio_path = NULL;
@@ -101,6 +98,9 @@ int main(int argc, char *argv[])
 	size_t modc = 0;
 	size_t i;
 	uint32_t tmo = 0;
+	int dbg_level = DBG_INFO;
+	enum dbg_flags dbg_flags = DBG_ANSI;
+
 	int err;
 
 	/*
@@ -109,7 +109,7 @@ int main(int argc, char *argv[])
 	setbuf(stdout, NULL);
 
 	(void)re_fprintf(stdout, "baresip v%s"
-			 " Copyright (C) 2010 - 2020"
+			 " Copyright (C) 2010 - 2024"
 			 " Alfred E. Heggestad et al.\n",
 			 BARESIP_VERSION);
 
@@ -119,11 +119,17 @@ int main(int argc, char *argv[])
 	if (err)
 		goto out;
 
+#ifdef RE_TRACE_ENABLED
+	err = re_trace_init("re_trace.json");
+	if (err)
+		goto out;
+#endif
+
 	tmr_init(&tmr_quit);
 
 #ifdef HAVE_GETOPT
 	for (;;) {
-		const int c = getopt(argc, argv, "46de:f:p:hu:n:vst:m:");
+		const int c = getopt(argc, argv, "46a:de:f:p:hu:n:vst:m:Tc");
 		if (0 > c)
 			break;
 
@@ -134,24 +140,26 @@ int main(int argc, char *argv[])
 			usage();
 			return -2;
 
+		case 'a':
+			software = optarg;
+			break;
+
 		case '4':
 			af = AF_INET;
 			break;
 
-#if HAVE_INET6
 		case '6':
 			af = AF_INET6;
 			break;
-#endif
 
 		case 'd':
 			run_daemon = true;
 			break;
 
 		case 'e':
-			if (execmdc >= ARRAY_SIZE(execmdv)) {
+			if (execmdc >= RE_ARRAY_SIZE(execmdv)) {
 				warning("max %zu commands\n",
-					ARRAY_SIZE(execmdv));
+					RE_ARRAY_SIZE(execmdv));
 				err = EINVAL;
 				goto out;
 			}
@@ -163,9 +171,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'm':
-			if (modc >= ARRAY_SIZE(modv)) {
+			if (modc >= RE_ARRAY_SIZE(modv)) {
 				warning("max %zu modules\n",
-					ARRAY_SIZE(modv));
+					RE_ARRAY_SIZE(modv));
 				err = EINVAL;
 				goto out;
 			}
@@ -194,6 +202,17 @@ int main(int argc, char *argv[])
 
 		case 'v':
 			log_enable_debug(true);
+			dbg_level = DBG_DEBUG;
+			break;
+
+		case 'T':
+			log_enable_timestamps(true);
+			dbg_flags |= DBG_TIME;
+			break;
+
+		case 'c':
+			log_enable_color(false);
+			dbg_flags &= ~DBG_ANSI;
 			break;
 
 		default:
@@ -205,11 +224,14 @@ int main(int argc, char *argv[])
 	(void)argv;
 #endif
 
+	dbg_init(dbg_level, dbg_flags);
 	err = conf_configure();
 	if (err) {
 		warning("main: configure failed: %m\n", err);
 		goto out;
 	}
+
+	re_thread_async_init(ASYNC_WORKERS);
 
 	/*
 	 * Set the network interface before initializing the config
@@ -262,12 +284,9 @@ int main(int argc, char *argv[])
 	}
 
 	/* Initialise User Agents */
-	err = ua_init("baresip v" BARESIP_VERSION " (" ARCH "/" OS ")",
-		      true, true, true);
+	err = ua_init(software, true, true, true);
 	if (err)
 		goto out;
-
-	net_change(baresip_network(), 60, net_change_handler, NULL);
 
 	uag_set_exit_handler(ua_exit_handler, NULL);
 
@@ -328,10 +347,18 @@ int main(int argc, char *argv[])
 	debug("main: unloading modules..\n");
 	mod_close();
 
+	re_thread_async_close();
+
+#ifdef RE_TRACE_ENABLED
+	re_trace_close();
+#endif
+
+	/* Check for open timers */
+	tmr_debug();
+
 	libre_close();
 
 	/* Check for memory leaks */
-	tmr_debug();
 	mem_debug();
 
 	return err;

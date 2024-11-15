@@ -1,7 +1,7 @@
 /**
  * @file gzrtp.cpp  GNU ZRTP: Media Path Key Agreement for Unicast Secure RTP
  *
- * Copyright (C) 2010 - 2017 Creytiv.com
+ * Copyright (C) 2010 - 2017 Alfred E. Heggestad
  */
 #include <stdint.h>
 
@@ -49,6 +49,7 @@ struct menc_sess {
 
 struct menc_media {
 	Stream *stream;
+	const struct stream *strm;  /**< pointer to parent */
 };
 
 
@@ -74,9 +75,6 @@ static int session_alloc(struct menc_sess **sessp, struct sdp_session *sdp,
 {
 	struct menc_sess *st;
 	(void)offerer;
-	(void)eventh;
-	(void)errorh;
-	(void)arg;
 	int err = 0;
 
 	if (!sessp || !sdp)
@@ -90,10 +88,15 @@ static int session_alloc(struct menc_sess **sessp, struct sdp_session *sdp,
 	if (!st->session)
 		err = ENOMEM;
 
-	if (err)
+	if (err) {
 		mem_deref(st);
-	else
+	}
+	else {
+		st->session->eventh = eventh;
+		st->session->errorh = errorh;
+		st->session->arg = arg;
 		*sessp = st;
+	}
 
 	return err;
 }
@@ -104,12 +107,15 @@ static int media_alloc(struct menc_media **stp, struct menc_sess *sess,
                        struct udp_sock *rtpsock, struct udp_sock *rtcpsock,
  		       const struct sa *raddr_rtp,
 		       const struct sa *raddr_rtcp,
-		       struct sdp_media *sdpm)
+		       struct sdp_media *sdpm,
+		       const struct stream *strm)
 {
 	struct menc_media *st;
 	int err = 0;
 	StreamMediaType med_type;
 	const char *med_name;
+	(void)raddr_rtp;
+	(void)raddr_rtcp;
 
 	if (!stp || !sess || !sess->session)
 		return EINVAL;
@@ -136,6 +142,7 @@ static int media_alloc(struct menc_media **stp, struct menc_sess *sess,
 	else
 		med_type = MT_UNKNOWN;
 
+	st->strm = strm;
 	st->stream = sess->session->create_stream(
 	                       *s_zrtp_config,
 	                       (struct udp_sock *)rtpsock,
@@ -202,7 +209,7 @@ static int module_init(void)
 
 	menc_register(baresip_mencl(), &menc_zrtp);
 
-	return cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
+	return cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
 }
 
 

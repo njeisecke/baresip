@@ -1,7 +1,7 @@
 /**
  * @file aac.c MPEG-4 AAC Audio Codec
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  * Copyright (C) 2019 Hessischer Rundfunk
  */
 
@@ -70,14 +70,14 @@ static struct aucodec aac = {
 	.fmtp_ench = aac_fmtp_enc,
 	.fmtp_cmph = aac_fmtp_cmp,
 /* try to make sure PCM audio buffer is always <= 120 samples */
-	.ptime     = 2,      /* 96 samples per channel @ 48000 hz */
+	.ptime     = 4,      /* 96 samples per channel @ 48000 hz */
 };
 
 
 void aac_encode_fmtp(const struct aac_param *prm)
 {
 	(void)re_snprintf(fmtp_local, sizeof(fmtp_local),
-	                  "streamType=5"
+	                  "streamType=%d"
 	                  "; profile-level-id=%u"
 	                  "; config=%s"
 	                  "; mode=%s"
@@ -86,9 +86,10 @@ void aac_encode_fmtp(const struct aac_param *prm)
 	                  "; indexLength=%u"
 	                  "; indexDeltaLength=%u"
 	                  "; bitrate=%u",
+			  AAC_STREAMTYPE_AUDIO,
 	                  prm->profile_level_id, prm->config, "AAC-hbr",
-	                  prm->constantduration, SIZELENGTH,
-	                  INDEXLENGTH, INDEXDELTALENGTH,
+	                  prm->constantduration, AAC_SIZELENGTH,
+	                  AAC_INDEXLENGTH, AAC_INDEXDELTALENGTH,
 	                  prm->bitrate);
 }
 

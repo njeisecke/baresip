@@ -1,7 +1,7 @@
 /**
  * @file swscale.c  Video filter for scaling and pixel conversion
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -27,6 +27,8 @@ static enum AVPixelFormat vidfmt_to_avpixfmt(enum vidfmt fmt)
 	case VID_FMT_YUV444P: return AV_PIX_FMT_YUV444P;
 	case VID_FMT_NV12:    return AV_PIX_FMT_NV12;
 	case VID_FMT_NV21:    return AV_PIX_FMT_NV21;
+	case VID_FMT_YUV422P: return AV_PIX_FMT_YUV422P;
+	case VID_FMT_YUYV422: return AV_PIX_FMT_YUYV422;
 	default:              return AV_PIX_FMT_NONE;
 	}
 }
@@ -126,7 +128,7 @@ static int encode_process(struct vidfilt_enc_st *st, struct vidframe *frame,
 		enc->sws = sws;
 
 		info("swscale: created SwsContext:"
-		     " `%s' %d x %d --> `%s' %u x %u\n",
+		     " '%s' %d x %d --> '%s' %u x %u\n",
 		     vidfmt_name(frame->fmt), width, height,
 		     vidfmt_name(enc->swscale_format),
 		     enc->dst_size.w, enc->dst_size.h);

@@ -1,7 +1,7 @@
 /**
  * @file modules/contact/contact.c  Contacts module
  *
- * Copyright (C) 2010 - 2015 Creytiv.com
+ * Copyright (C) 2010 - 2015 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
@@ -94,7 +94,7 @@ static int cmd_dial_contact(struct re_printf *pf, void *arg)
 
 	uri = contact_uri(cnt);
 
-	err = ua_connect(uag_current(), NULL, NULL, uri, VIDMODE_ON);
+	err = ua_connect(uag_find_requri(uri), NULL, NULL, uri, VIDMODE_ON);
 	if (err) {
 		warning("contact: ua_connect(%s) failed: %m\n",
 			uri, err);
@@ -118,7 +118,7 @@ static int cmd_message(struct re_printf *pf, void *arg)
 
 	uri = contact_uri(cnt);
 
-	err = message_send(uag_current(), uri, carg->prm,
+	err = message_send(uag_find_requri(uri), uri, carg->prm,
 			   send_resp_handler, NULL);
 	if (err) {
 		(void)re_hprintf(pf, "contact: message_send(%s) failed (%m)\n",
@@ -142,7 +142,7 @@ static int load_current_contact(struct contacts *contacts, const char *path)
 	if (re_snprintf(file, sizeof(file), "%s/current_contact", path) < 0)
 		return ENOMEM;
 
-	if (conf_fileexist(file)) {
+	if (fs_isfile(file)) {
 
 		f = fopen(file, "r");
 		if (!f)
@@ -248,7 +248,6 @@ static const struct cmd cmdv[] = {
 
 static int write_template(const char *file)
 {
-	const char *user, *domain;
 	FILE *f = NULL;
 
 	info("contact: creating contacts template %s\n", file);
@@ -256,13 +255,6 @@ static int write_template(const char *file)
 	f = fopen(file, "w");
 	if (!f)
 		return errno;
-
-	user = sys_username();
-	if (!user)
-		user = "user";
-	domain = net_domain(baresip_network());
-	if (!domain)
-		domain = "domain";
 
 	(void)re_fprintf(f,
 			 "#\n"
@@ -276,15 +268,15 @@ static int write_template(const char *file)
 			 "#\n"
 			 "\n"
 			 "\n"
-			 "\"Echo Server\" <sip:echo@creytiv.com>\n"
-			 "\"%s\" <sip:%s@%s>;presence=p2p\n"
+			 "\"Music Server\" <sip:music@iptel.org>\n"
+			 "\"User\" <sip:user@domain>;presence=p2p\n"
 			 "\n"
 			 "# Access rules\n"
 			 "#\"Catch All\" <sip:*@*>;access=block\n"
-			 "\"Good Friend\" <sip:good@friend.com>;access=allow\n"
+			 "\"Good Friend\" <sip:good@example.com>;"
+				"access=allow\n"
 			 "\n"
-			 ,
-			 user, user, domain);
+			 );
 
 	if (f)
 		(void)fclose(f);
@@ -306,7 +298,7 @@ static int module_init(void)
 	if (re_snprintf(file, sizeof(file), "%s/contacts", path) < 0)
 		return ENOMEM;
 
-	if (!conf_fileexist(file)) {
+	if (!fs_isfile(file)) {
 
 		(void)fs_mkdir(path, 0700);
 
@@ -319,7 +311,7 @@ static int module_init(void)
 	if (err)
 		return err;
 
-	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
 	if (err)
 		return err;
 

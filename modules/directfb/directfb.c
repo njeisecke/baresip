@@ -1,7 +1,7 @@
 /**
  * @file directfb.c  DirectFB video display module
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  * Copyright (C) 2013 Andreas Shimokawa <andi@fischlustig.de>
  */
 #include <re.h>
@@ -11,7 +11,6 @@
 
 
 struct vidisp_st {
-	const struct vidisp *vd;       /**< Inheritance (1st)     */
 	struct vidsz size;             /**< Current size          */
 	IDirectFBWindow *window;       /**< DirectFB Window       */
 	IDirectFBSurface *surface;     /**< Surface for pixels    */
@@ -52,8 +51,6 @@ static int alloc(struct vidisp_st **stp, const struct vidisp *vd,
 	st = mem_zalloc(sizeof(*st), destructor);
 	if (!st)
 		return ENOMEM;
-
-	st->vd = vd;
 
 	dfb->GetDisplayLayer(dfb, DLID_PRIMARY, &st->layer);
 

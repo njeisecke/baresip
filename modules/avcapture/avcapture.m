@@ -1,7 +1,7 @@
 /**
  * @file avcapture.m AVFoundation video capture
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -31,7 +31,6 @@ static struct vidsrc *vidsrc;
 
 
 struct vidsrc_st {
-	const struct vidsrc *vs;
 	avcap *cap;
 	vidsrc_frame_h *frameh;
 	void *arg;
@@ -113,9 +112,9 @@ static void vidframe_set_pixbuf(struct vidframe *f, const CVImageBufferRef b)
 #endif
 		{{1280, 720}, &AVCaptureSessionPreset1280x720}
 	};
-	int i, best = -1;
+	int best = -1;
 
-	for (i=ARRAY_SIZE(mapv)-1; i>=0; i--) {
+	for (int i=RE_ARRAY_SIZE(mapv)-1; i>=0; i--) {
 
 		NSString *preset = *mapv[i].preset;
 
@@ -151,8 +150,27 @@ static void vidframe_set_pixbuf(struct vidframe *f, const CVImageBufferRef b)
 + (AVCaptureDevice *)get_device:(AVCaptureDevicePosition)pos
 {
 	AVCaptureDevice *dev;
+#if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 100000 || \
+     __MAC_OS_X_VERSION_MIN_REQUIRED >= 101500)
+	AVCaptureDeviceDiscoverySession *discoverySession;
 
+	discoverySession = [
+		AVCaptureDeviceDiscoverySession
+		discoverySessionWithDeviceTypes:
+			@[AVCaptureDeviceTypeBuiltInWideAngleCamera,
+#if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 170000 || \
+     __MAC_OS_X_VERSION_MIN_REQUIRED >= 140000)
+			  AVCaptureDeviceTypeExternal]
+#else
+			  AVCaptureDeviceTypeExternalUnknown]
+#endif
+		mediaType:AVMediaTypeVideo
+		position:pos
+	];
+	for (dev in discoverySession.devices) {
+#else
 	for (dev in [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo]) {
+#endif
 		if (dev.position == pos)
 			return dev;
 	}
@@ -301,20 +319,22 @@ static void destructor(void *arg)
 
 
 static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
-		 struct media_ctx **ctx, struct vidsrc_prm *prm,
+		 struct vidsrc_prm *prm,
 		 const struct vidsz *size, const char *fmt,
 		 const char *dev, vidsrc_frame_h *frameh,
+		 vidsrc_packet_h *packeth,
 		 vidsrc_error_h *errorh, void *arg)
 {
 	NSAutoreleasePool *pool;
 	struct vidsrc_st *st;
 	int err = 0;
 
-	(void)ctx;
 	(void)prm;
 	(void)fmt;
 	(void)dev;
+	(void)packeth;
 	(void)errorh;
+	(void)vs;
 
 	if (!stp || !size)
 		return EINVAL;
@@ -325,7 +345,6 @@ static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 
 	pool = [NSAutoreleasePool new];
 
-	st->vs     = vs;
 	st->frameh = frameh;
 	st->arg    = arg;
 
@@ -366,6 +385,11 @@ static int module_init(void)
 {
 	AVCaptureDevice *dev = nil;
 	NSAutoreleasePool *pool;
+#if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 100000 || \
+     __MAC_OS_X_VERSION_MIN_REQUIRED >= 101500)
+	AVCaptureDeviceDiscoverySession *discoverySession;
+#endif
+
 	Class cls = NSClassFromString(@"AVCaptureDevice");
 	int err = 0;
 	if (!cls)
@@ -379,8 +403,26 @@ static int module_init(void)
 		goto out;
 
 	/* populate devices */
-	for (dev in [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo]) {
+#if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 100000 || \
+     __MAC_OS_X_VERSION_MIN_REQUIRED >= 101500)
+	discoverySession = [
+		AVCaptureDeviceDiscoverySession
+		discoverySessionWithDeviceTypes:
+			@[AVCaptureDeviceTypeBuiltInWideAngleCamera,
+#if (__IPHONE_OS_VERSION_MIN_REQUIRED >= 170000 || \
+     __MAC_OS_X_VERSION_MIN_REQUIRED >= 140000)
+			  AVCaptureDeviceTypeExternal]
+#else
+			  AVCaptureDeviceTypeExternalUnknown]
+#endif
+		mediaType:AVMediaTypeVideo
+		position:AVCaptureDevicePositionUnspecified
+	];
 
+	for (dev in discoverySession.devices) {
+#else
+	for (dev in [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo]) {
+#endif
 		const char *name = [[dev localizedName] UTF8String];
 
 		debug("avcapture: found video device '%s'\n", name);

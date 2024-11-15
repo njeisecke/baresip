@@ -1,9 +1,12 @@
 /**
  * @file audiounit.h  AudioUnit sound driver -- Internal interface
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
+#if __MAC_OS_X_VERSION_MAX_ALLOWED < 120000
+#define kAudioObjectPropertyElementMain (kAudioObjectPropertyElementMaster)
+#endif
 
 AudioComponent audiounit_comp_io;
 AudioComponent audiounit_comp_conv;
@@ -33,7 +36,6 @@ int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 			   struct auplay_prm *prm, const char *device,
 			   auplay_write_h *wh, void *arg);
 int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
-			     struct media_ctx **ctx,
 			     struct ausrc_prm *prm, const char *device,
 			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg);
 

@@ -1,11 +1,12 @@
 /**
  * @file av1/encode.c AV1 Encode
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 
 #include <string.h>
 #include <re.h>
+#include <re_av1.h>
 #include <rem.h>
 #include <baresip.h>
 #include <aom/aom.h>
@@ -14,9 +15,9 @@
 #include "av1.h"
 
 
-enum {
-	HDR_SIZE = 4,
-};
+#ifndef AOM_USAGE_REALTIME
+#define AOM_USAGE_REALTIME (1)
+#endif
 
 
 struct videnc_state {
@@ -26,9 +27,8 @@ struct videnc_state {
 	unsigned bitrate;
 	unsigned pktsize;
 	bool ctxup;
-	uint16_t picid;
 	videnc_packet_h *pkth;
-	void *arg;
+	const struct video *vid;
 };
 
 
@@ -43,11 +43,12 @@ static void destructor(void *arg)
 
 int av1_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		      struct videnc_param *prm, const char *fmtp,
-		      videnc_packet_h *pkth, void *arg)
+		      videnc_packet_h *pkth, const struct video *vid)
 {
 	struct videnc_state *ves;
+	(void)fmtp;
 
-	if (!vesp || !vc || !prm || prm->pktsize < (HDR_SIZE + 1))
+	if (!vesp || !vc || !prm || prm->pktsize < (AV1_AGGR_HDR_SIZE + 1))
 		return EINVAL;
 
 	ves = *vesp;
@@ -57,8 +58,6 @@ int av1_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		ves = mem_zalloc(sizeof(*ves), destructor);
 		if (!ves)
 			return ENOMEM;
-
-		ves->picid = rand_u16();
 
 		*vesp = ves;
 	}
@@ -75,7 +74,7 @@ int av1_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 	ves->pktsize = prm->pktsize;
 	ves->fps     = prm->fps;
 	ves->pkth    = pkth;
-	ves->arg     = arg;
+	ves->vid     = vid;
 
 	return 0;
 }
@@ -86,20 +85,26 @@ static int open_encoder(struct videnc_state *ves, const struct vidsz *size)
 	aom_codec_enc_cfg_t cfg;
 	aom_codec_err_t res;
 
-	res = aom_codec_enc_config_default(&aom_codec_av1_cx_algo, &cfg, 0);
+	res = aom_codec_enc_config_default(&aom_codec_av1_cx_algo, &cfg,
+					   AOM_USAGE_REALTIME);
 	if (res)
 		return EPROTO;
 
 	cfg.g_w               = size->w;
 	cfg.g_h               = size->h;
 	cfg.g_timebase.num    = 1;
-	cfg.g_timebase.den    = ves->fps;
+	cfg.g_timebase.den    = VIDEO_TIMEBASE;
+	cfg.g_threads         = 8;
 	cfg.g_error_resilient = AOM_ERROR_RESILIENT_DEFAULT;
 	cfg.g_pass            = AOM_RC_ONE_PASS;
 	cfg.g_lag_in_frames   = 0;
 	cfg.rc_end_usage      = AOM_VBR;
-	cfg.rc_target_bitrate = ves->bitrate;
+	cfg.rc_target_bitrate = ves->bitrate / 1000;
 	cfg.kf_mode           = AOM_KF_AUTO;
+#if 0
+	cfg.kf_min_dist       = ves->fps * 10;
+	cfg.kf_max_dist       = ves->fps * 10;
+#endif
 
 	if (ves->ctxup) {
 		debug("av1: re-opening encoder\n");
@@ -126,55 +131,27 @@ static int open_encoder(struct videnc_state *ves, const struct vidsz *size)
 }
 
 
-static inline void hdr_encode(uint8_t hdr[HDR_SIZE], bool noref, bool start,
-			      uint8_t partid, uint16_t picid)
+static int packetize_rtp(struct videnc_state *ves,
+			 bool keyframe, uint64_t rtp_ts,
+			 const uint8_t *buf, size_t size)
 {
-	hdr[0] = 1<<7 | noref<<5 | start<<4 | (partid & 0x7);
-	hdr[1] = 1<<7;
-	hdr[2] = 1<<7 | (picid>>8 & 0x7f);
-	hdr[3] = picid & 0xff;
+	bool new_flag = keyframe;
+
+	return av1_packetize_high(&new_flag, true, rtp_ts, buf, size,
+				  ves->pktsize, (av1_packet_h *)ves->pkth,
+				  (void *)ves->vid);
 }
 
 
-static inline int packetize(bool marker, uint64_t rtp_ts,
-			    const uint8_t *buf, size_t len,
-			    size_t maxlen, bool noref, uint8_t partid,
-			    uint16_t picid, videnc_packet_h *pkth, void *arg)
-{
-	uint8_t hdr[HDR_SIZE];
-	bool start = true;
-	int err = 0;
-
-	maxlen -= sizeof(hdr);
-
-	while (len > maxlen) {
-
-		hdr_encode(hdr, noref, start, partid, picid);
-
-		err |= pkth(false, rtp_ts, hdr, sizeof(hdr), buf, maxlen, arg);
-
-		buf  += maxlen;
-		len  -= maxlen;
-		start = false;
-	}
-
-	hdr_encode(hdr, noref, start, partid, picid);
-
-	err |= pkth(marker, rtp_ts, hdr, sizeof(hdr), buf, len, arg);
-
-	return err;
-}
-
-
-int av1_encode(struct videnc_state *ves, bool update,
-		const struct vidframe *frame, uint64_t timestamp)
+int av1_encode_packet(struct videnc_state *ves, bool update,
+		      const struct vidframe *frame, uint64_t timestamp)
 {
 	aom_enc_frame_flags_t flags = 0;
 	aom_codec_iter_t iter = NULL;
 	aom_codec_err_t res;
 	aom_image_t *img;
 	aom_img_fmt_t img_fmt;
-	int err = 0, i;
+	int err = 0;
 
 	if (!ves || !frame || frame->fmt != VID_FMT_YUV420P)
 		return EINVAL;
@@ -189,7 +166,7 @@ int av1_encode(struct videnc_state *ves, bool update,
 	}
 
 	if (update) {
-		/* debug("av1: picture update\n"); */
+		debug("av1: picture update\n");
 		flags |= AOM_EFLAG_FORCE_KF;
 	}
 
@@ -198,30 +175,27 @@ int av1_encode(struct videnc_state *ves, bool update,
 	img = aom_img_wrap(NULL, img_fmt, frame->size.w, frame->size.h,
 			   16, NULL);
 	if (!img) {
-		warning("vp9: encoder: could not allocate image\n");
+		warning("av1: encoder: could not allocate image\n");
 		err = ENOMEM;
 		goto out;
 	}
 
-	for (i=0; i<4; i++) {
+	for (unsigned i=0; i<3; i++) {
 		img->stride[i] = frame->linesize[i];
 		img->planes[i] = frame->data[i];
 	}
 
-	res = aom_codec_encode(&ves->ctx, img, timestamp, 1,
-			       flags);
+	res = aom_codec_encode(&ves->ctx, img, timestamp, 1, flags);
 	if (res) {
 		warning("av1: enc error: %s\n", aom_codec_err_to_string(res));
-		return ENOMEM;
+		err = ENOMEM;
+		goto out;
 	}
 
-	++ves->picid;
-
 	for (;;) {
-		bool keyframe = false, marker = true;
 		const aom_codec_cx_pkt_t *pkt;
-		uint8_t partid = 0;
-		uint64_t ts;
+		uint64_t rtp_ts;
+		bool keyframe = false;
 
 		pkt = aom_codec_get_cx_data(&ves->ctx, &iter);
 		if (!pkt)
@@ -230,29 +204,40 @@ int av1_encode(struct videnc_state *ves, bool update,
 		if (pkt->kind != AOM_CODEC_CX_FRAME_PKT)
 			continue;
 
-		if (pkt->data.frame.flags & AOM_FRAME_IS_KEY)
+		if (pkt->data.frame.flags & AOM_FRAME_IS_KEY) {
 			keyframe = true;
+			debug("av1: encode: keyframe\n");
+		}
 
-		if (pkt->data.frame.flags & AOM_FRAME_IS_FRAGMENT)
-			marker = false;
+		rtp_ts = video_calc_rtp_timestamp_fix(pkt->data.frame.pts);
 
-		if (pkt->data.frame.partition_id >= 0)
-			partid = pkt->data.frame.partition_id;
-
-		ts = video_calc_rtp_timestamp_fix(pkt->data.frame.pts);
-
-		err = packetize(marker, ts,
-				pkt->data.frame.buf,
-				pkt->data.frame.sz,
-				ves->pktsize, !keyframe, partid, ves->picid,
-				ves->pkth, ves->arg);
+		err = packetize_rtp(ves, keyframe, rtp_ts,
+				    pkt->data.frame.buf, pkt->data.frame.sz);
 		if (err)
-			return err;
+			break;
 	}
 
  out:
 	if (img)
 		aom_img_free(img);
+
+	return err;
+}
+
+
+int av1_encode_packetize(struct videnc_state *ves,
+			 const struct vidpacket *packet)
+{
+	uint64_t rtp_ts;
+	int err;
+
+	if (!ves || !packet)
+		return EINVAL;
+
+	rtp_ts = video_calc_rtp_timestamp_fix(packet->timestamp);
+
+	err = packetize_rtp(ves, packet->keyframe, rtp_ts,
+			    packet->buf, packet->size);
 
 	return err;
 }

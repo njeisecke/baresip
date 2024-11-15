@@ -1,10 +1,11 @@
 /**
  * @file test/play.c  Baresip selftest -- audio file player
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <string.h>
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
 #include "test.h"
 
@@ -39,11 +40,12 @@ static struct mbuf *generate_tone(void)
 }
 
 
-static void sample_handler(const void *sampv, size_t sampc, void *arg)
+static void auframe_handler(struct auframe *af, const char *dev, void *arg)
 {
 	struct test *test = arg;
-	size_t bytec = sampc * 2;
+	size_t bytec = af->sampc * 2;
 	int err = 0;
+	(void)dev;
 
 	if (!test->mb_samp) {
 		test->mb_samp = mbuf_alloc(bytec);
@@ -51,7 +53,7 @@ static void sample_handler(const void *sampv, size_t sampc, void *arg)
 	}
 
 	/* save the samples that was played */
-	err = mbuf_write_mem(test->mb_samp, (void *)sampv, bytec);
+	err = mbuf_write_mem(test->mb_samp, (void *)af->sampv, bytec);
 
  out:
 	/* stop the test? */
@@ -73,7 +75,7 @@ int test_play(void)
 
 	/* use a mock audio-driver to save the audio-samples */
 	err = mock_auplay_register(&auplay, baresip_auplayl(),
-				   sample_handler, &test);
+				   auframe_handler, &test);
 	ASSERT_EQ(0, err);
 
 	err = play_init(&player);

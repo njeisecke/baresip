@@ -1,7 +1,7 @@
 /**
  * @file dtls_srtp.c DTLS-SRTP media encryption
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 
 #include <re.h>
@@ -21,7 +21,7 @@
  * DTLS-SRTP can be enabled in ~/.baresip/accounts:
  *
  \verbatim
-  <sip:user@domain.com>;mediaenc=dtls_srtp
+  <sip:user@example.com>;mediaenc=dtls_srtp
  \endverbatim
  *
  *
@@ -63,12 +63,29 @@ struct dtls_srtp {
 	bool mux;
 };
 
+/* RFC 4145 */
+enum setup {
+	SETUP_ACTIVE = 0,
+	SETUP_PASSIVE,
+	SETUP_ACTPASS,
+};
+
 static struct tls *tls;
 static const char* srtp_profiles =
 	"SRTP_AES128_CM_SHA1_80:"
 	"SRTP_AES128_CM_SHA1_32:"
 	"SRTP_AEAD_AES_128_GCM:"
 	"SRTP_AEAD_AES_256_GCM";
+
+
+static enum setup setup_decode(const char *setup)
+{
+	if (0 == str_casecmp(setup, "active")) return SETUP_ACTIVE;
+	if (0 == str_casecmp(setup, "passive")) return SETUP_PASSIVE;
+	if (0 == str_casecmp(setup, "actpass")) return SETUP_ACTPASS;
+
+	return (enum setup)-1;
+}
 
 
 static void sess_destructor(void *arg)
@@ -191,11 +208,11 @@ static size_t get_master_keylen(enum srtp_suite suite)
 {
 	switch (suite) {
 
-		case SRTP_AES_CM_128_HMAC_SHA1_32: return 16+14;
-		case SRTP_AES_CM_128_HMAC_SHA1_80: return 16+14;
-		case SRTP_AES_128_GCM:             return 16+12;
-		case SRTP_AES_256_GCM:             return 32+12;
-		default: return 0;
+	case SRTP_AES_CM_128_HMAC_SHA1_32: return 16+14;
+	case SRTP_AES_CM_128_HMAC_SHA1_80: return 16+14;
+	case SRTP_AES_128_GCM:             return 16+12;
+	case SRTP_AES_256_GCM:             return 32+12;
+	default: return 0;
 	}
 }
 
@@ -209,6 +226,9 @@ static void dtls_estab_handler(void *arg)
 	char buf[32] = "";
 	size_t keylen;
 	int err;
+
+	debug("dtls_srtp: established: cipher=%s\n",
+	      tls_cipher_name(comp->tls_conn));
 
 	if (!verify_fingerprint(ds->sess->sdp, ds->sdpm, comp->tls_conn)) {
 		warning("dtls_srtp: could not verify remote fingerprint\n");
@@ -279,13 +299,23 @@ static void dtls_conn_handler(const struct sa *peer, void *arg)
 {
 	struct comp *comp = arg;
 	int err;
-	(void)peer;
 
-	info("dtls_srtp: incoming DTLS connect from %J\n", peer);
+	info("dtls_srtp: %s: incoming DTLS connect from %J\n",
+	     sdp_media_name(comp->ds->sdpm), peer);
+
+	if (comp->ds->active) {
+		warning("dtls_srtp: conn_handler: role is active\n");
+		return;
+	}
 
 	if (comp->tls_conn) {
-		warning("dtls_srtp: dtls already accepted (peer = %J)\n",
+		warning("dtls_srtp: '%s' dtls already accepted (peer = %J)\n",
+			sdp_media_name(comp->ds->sdpm),
 			dtls_peer(comp->tls_conn));
+
+		if (comp->ds->sess->errorh)
+			comp->ds->sess->errorh(EPROTO, comp->ds->sess->arg);
+
 		return;
 	}
 
@@ -315,6 +345,9 @@ static int component_start(struct comp *comp, const struct sa *raddr)
 		warning("dtls_srtp: dtls_listen failed (%m)\n", err);
 		return err;
 	}
+
+	/* maximum one DTLS connection */
+	dtls_set_single(comp->dtls_sock, true);
 
 	if (sa_isset(raddr, SA_ALL)) {
 
@@ -427,7 +460,9 @@ static int media_alloc(struct menc_media **mp, struct menc_sess *sess,
 
 	setup = sdp_media_session_rattr(st->sdpm, st->sess->sdp, "setup");
 	if (setup) {
-		st->active = !(0 == str_casecmp(setup, "active"));
+		enum setup rsetup = setup_decode(setup);
+
+		st->active = rsetup != SETUP_ACTIVE;
 
 		err = media_start(st, st->sdpm, raddr_rtp, raddr_rtcp);
 		if (err)
@@ -463,17 +498,19 @@ static int media_alloc(struct menc_media **mp, struct menc_sess *sess,
 
 
 static struct menc dtls_srtp = {
-	.id        = "dtls_srtp",
-	.sdp_proto = "UDP/TLS/RTP/SAVPF",
+	.id          = "dtls_srtp",
+	.sdp_proto   = "UDP/TLS/RTP/SAVPF",
 	.wait_secure = true,
-	.sessh     = session_alloc,
-	.mediah    = media_alloc
+	.sessh       = session_alloc,
+	.mediah      = media_alloc
 };
 
 
 static int module_init(void)
 {
 	struct list *mencl = baresip_mencl();
+	char ec[64] = "prime256v1";
+	const char *cn = "dtls@baresip";
 	int err;
 
 	err = tls_alloc(&tls, TLS_METHOD_DTLSV1, NULL, NULL);
@@ -483,14 +520,18 @@ static int module_init(void)
 		return err;
 	}
 
-	err = tls_set_selfsigned(tls, "dtls@baresip");
+	(void)conf_get_str(conf_cur(), "dtls_srtp_use_ec", ec, sizeof(ec));
+
+	info ("dtls_srtp: use %s for elliptic curve cryptography\n", ec);
+
+	err = tls_set_selfsigned_ec(tls, cn, ec);
 	if (err) {
-		warning("dtls_srtp: failed to self-sign certificate (%m)\n",
-			err);
+		warning("dtls_srtp: failed to self-sign "
+			"ec-certificate (%m)\n", err);
 		return err;
 	}
 
-	tls_set_verify_client(tls);
+	tls_set_verify_client_trust_all(tls);
 
 	err = tls_set_srtp(tls, srtp_profiles);
 	if (err) {

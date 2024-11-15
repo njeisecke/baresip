@@ -1,7 +1,7 @@
 /**
  * @file coreaudio.c  Apple Coreaudio sound driver
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <AudioToolbox/AudioToolbox.h>
 #include <re.h>
@@ -27,12 +27,12 @@ int coreaudio_enum_devices(const char *name, struct list *dev_list,
 	AudioObjectPropertyAddress propertyAddress = {
 		kAudioHardwarePropertyDevices,
 		kAudioObjectPropertyScopeGlobal,
-		kAudioObjectPropertyElementMaster
+		kAudioObjectPropertyElementMain
 	};
 
 	AudioDeviceID *audioDevices = NULL;
 	UInt32 dataSize = 0;
-	UInt32 deviceCount;
+	UInt32 deviceCount, i;
 	OSStatus status;
 
 	int err = 0;
@@ -87,7 +87,7 @@ int coreaudio_enum_devices(const char *name, struct list *dev_list,
 	else
 		propertyAddress.mScope = kAudioDevicePropertyScopeOutput;
 
-	for (UInt32 i = 0; i < deviceCount; ++i) {
+	for (i = 0; i < deviceCount; ++i) {
 
 		CFStringRef deviceUID = NULL;
 		CFStringRef deviceName = NULL;
@@ -101,7 +101,7 @@ int coreaudio_enum_devices(const char *name, struct list *dev_list,
 							0,
 							NULL,
 							&dataSize);
-		if (dataSize == 0)
+		if (kAudioHardwareNoError != status || dataSize == 0)
 			continue;
 
 		dataSize = sizeof(deviceUID);

@@ -1,7 +1,7 @@
 /**
  * @file vp9/encode.c VP9 Encode
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 
 #include <string.h>
@@ -27,7 +27,7 @@ struct videnc_state {
 	bool ctxup;
 	uint16_t picid;
 	videnc_packet_h *pkth;
-	void *arg;
+	const struct video *vid;
 
 	unsigned n_frames;
 	unsigned n_key_frames;
@@ -54,7 +54,7 @@ static void destructor(void *arg)
 
 int vp9_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		      struct videnc_param *prm, const char *fmtp,
-		      videnc_packet_h *pkth, void *arg)
+		      videnc_packet_h *pkth, const struct video *vid)
 {
 	const struct vp9_vidcodec *vp9 = (struct vp9_vidcodec *)vc;
 	struct videnc_state *ves;
@@ -89,7 +89,7 @@ int vp9_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 	ves->pktsize = prm->pktsize;
 	ves->fps     = prm->fps;
 	ves->pkth    = pkth;
-	ves->arg     = arg;
+	ves->vid     = vid;
 
 	max_fs = vp9_max_fs(fmtp);
 	if (max_fs > 0)
@@ -176,7 +176,7 @@ static int send_packet(struct videnc_state *ves, bool marker,
 	ves->n_bytes += (hdr_len + pld_len);
 
 	return ves->pkth(marker, rtp_ts, hdr, hdr_len, pld, pld_len,
-			 ves->arg);
+			 ves->vid);
 }
 
 
@@ -220,7 +220,7 @@ int vp9_encode(struct videnc_state *ves, bool update,
 	vpx_codec_err_t res;
 	vpx_image_t *img = NULL;
 	vpx_img_fmt_t img_fmt;
-	int err, i;
+	int err = 0, i;
 
 	if (!ves || !frame)
 		return EINVAL;
@@ -313,4 +313,26 @@ int vp9_encode(struct videnc_state *ves, bool update,
 		vpx_img_free(img);
 
 	return err;
+}
+
+
+int vp9_encode_packetize(struct videnc_state *ves,
+			 const struct vidpacket *pkt)
+{
+	uint64_t rtp_ts;
+	int err;
+
+	if (!ves || !pkt)
+		return EINVAL;
+
+	++ves->picid;
+
+	rtp_ts = video_calc_rtp_timestamp_fix(pkt->timestamp);
+
+	err = packetize(ves, true, pkt->buf, pkt->size,
+			ves->pktsize, ves->picid, rtp_ts);
+	if (err)
+		return err;
+
+	return 0;
 }

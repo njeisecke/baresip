@@ -1,7 +1,7 @@
 /**
  * @file portaudio.c  Portaudio sound driver
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <stdlib.h>
 #include <string.h>
@@ -26,21 +26,19 @@
 
 
 struct ausrc_st {
-	const struct ausrc *as;      /* inheritance */
 	PaStream *stream_rd;
 	ausrc_read_h *rh;
 	void *arg;
 	volatile bool ready;
-	unsigned ch;
+	struct ausrc_prm prm;
 };
 
 struct auplay_st {
-	const struct auplay *ap;      /* inheritance */
 	PaStream *stream_wr;
 	auplay_write_h *wh;
 	void *arg;
 	volatile bool ready;
-	unsigned ch;
+	struct auplay_prm prm;
 };
 
 
@@ -59,6 +57,7 @@ static int read_callback(const void *inputBuffer, void *outputBuffer,
 			 PaStreamCallbackFlags statusFlags, void *userData)
 {
 	struct ausrc_st *st = userData;
+	struct auframe af;
 	size_t sampc;
 
 	(void)outputBuffer;
@@ -68,9 +67,13 @@ static int read_callback(const void *inputBuffer, void *outputBuffer,
 	if (!st->ready)
 		return paAbort;
 
-	sampc = frameCount * st->ch;
+	sampc = frameCount * st->prm.ch;
 
-	st->rh(inputBuffer, sampc, st->arg);
+	auframe_init(&af, st->prm.fmt, (void *)inputBuffer, sampc,
+		     st->prm.srate, st->prm.ch);
+	af.timestamp = Pa_GetStreamTime(st->stream_rd) * AUDIO_TIMEBASE;
+
+	st->rh(&af, st->arg);
 
 	return paContinue;
 }
@@ -82,6 +85,7 @@ static int write_callback(const void *inputBuffer, void *outputBuffer,
 			  PaStreamCallbackFlags statusFlags, void *userData)
 {
 	struct auplay_st *st = userData;
+	struct auframe af;
 	size_t sampc;
 
 	(void)inputBuffer;
@@ -91,9 +95,12 @@ static int write_callback(const void *inputBuffer, void *outputBuffer,
 	if (!st->ready)
 		return paAbort;
 
-	sampc = frameCount * st->ch;
+	sampc = frameCount * st->prm.ch;
 
-	st->wh(outputBuffer, sampc, st->arg);
+	auframe_init(&af, st->prm.fmt, outputBuffer, sampc, st->prm.srate,
+		     st->prm.ch);
+
+	st->wh(&af, st->arg);
 
 	return paContinue;
 }
@@ -203,7 +210,6 @@ static void auplay_destructor(void *arg)
 
 
 static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
-		     struct media_ctx **ctx,
 		     struct ausrc_prm *prm, const char *device,
 		     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
 {
@@ -211,7 +217,6 @@ static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	PaDeviceIndex dev_index;
 	int err;
 
-	(void)ctx;
 	(void)device;
 	(void)errh;
 
@@ -227,10 +232,9 @@ static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 	if (!st)
 		return ENOMEM;
 
-	st->as  = as;
 	st->rh  = rh;
 	st->arg = arg;
-	st->ch  = prm->ch;
+	st->prm = *prm;
 
 	st->ready = true;
 
@@ -270,10 +274,9 @@ static int play_alloc(struct auplay_st **stp, const struct auplay *ap,
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
-	st->ch  = prm->ch;
+	st->prm  = *prm;
 
 	st->ready = true;
 
@@ -294,36 +297,92 @@ static int play_alloc(struct auplay_st **stp, const struct auplay *ap,
 static int pa_init(void)
 {
 	PaError paerr;
-	int i, n, err = 0;
+	int err = 0;
 
-	paerr = Pa_Initialize();
+	if (log_level_get() == LEVEL_DEBUG) {
+		paerr = Pa_Initialize();
+	}
+	else {
+		fs_stdio_hide();
+		paerr = Pa_Initialize();
+		fs_stdio_restore();
+	}
 	if (paNoError != paerr) {
 		warning("portaudio: init: %s\n", Pa_GetErrorText(paerr));
 		return ENODEV;
 	}
 
-	n = Pa_GetDeviceCount();
+	if (paNoDevice != Pa_GetDefaultInputDevice())
+		err |= ausrc_register(&ausrc, baresip_ausrcl(), "portaudio",
+				      src_alloc);
+
+	if (paNoDevice != Pa_GetDefaultOutputDevice())
+		err |= auplay_register(&auplay, baresip_auplayl(), "portaudio",
+				       play_alloc);
+
+	if (err)
+		return err;
+
+	int n = Pa_GetDeviceCount();
 
 	info("portaudio: device count is %d\n", n);
 
-	for (i=0; i<n; i++) {
-		const PaDeviceInfo *devinfo;
+	for (int i = 0; i < n; i++) {
+		struct mediadev *dev;
+		char devname[128];
 
-		devinfo = Pa_GetDeviceInfo(i);
+		const PaDeviceInfo *devinfo = Pa_GetDeviceInfo(i);
+		if (!devinfo)
+			continue;
 
-		debug("portaudio: device %d: %s\n", i, devinfo->name);
-		(void)devinfo;
+		const PaHostApiInfo *apiinfo =
+			Pa_GetHostApiInfo(devinfo->hostApi);
+		if (!apiinfo)
+			continue;
+
+		re_snprintf(devname, sizeof(devname), "%s: %s", apiinfo->name,
+			    devinfo->name);
+
+		debug("portaudio: device %d: %s\n", i, devname);
+
+		if (devinfo->maxInputChannels > 0) {
+			err = mediadev_add(&ausrc->dev_list, devname);
+			if (err) {
+				warning("portaudio: mediadev err %m\n", err);
+				return err;
+			}
+
+			dev = mediadev_find(&ausrc->dev_list, devname);
+			if (!dev)
+				continue;
+
+			dev->host_index	  = devinfo->hostApi;
+			dev->device_index = i;
+			dev->src.is_default =
+				(i == Pa_GetDefaultInputDevice());
+			dev->src.channels = devinfo->maxInputChannels;
+		}
+
+		if (devinfo->maxOutputChannels > 0) {
+			err = mediadev_add(&auplay->dev_list, devname);
+			if (err) {
+				warning("portaudio: mediadev err %m\n", err);
+				return err;
+			}
+
+			dev = mediadev_find(&auplay->dev_list, devname);
+			if (!dev)
+				continue;
+
+			dev->host_index	  = devinfo->hostApi;
+			dev->device_index = i;
+			dev->play.is_default =
+				(i == Pa_GetDefaultOutputDevice());
+			dev->play.channels = devinfo->maxOutputChannels;
+		}
 	}
 
-	if (paNoDevice != Pa_GetDefaultInputDevice())
-		err |= ausrc_register(&ausrc, baresip_ausrcl(),
-				      "portaudio", src_alloc);
-
-	if (paNoDevice != Pa_GetDefaultOutputDevice())
-		err |= auplay_register(&auplay, baresip_auplayl(),
-				       "portaudio", play_alloc);
-
-	return err;
+	return 0;
 }
 
 

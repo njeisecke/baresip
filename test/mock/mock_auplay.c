@@ -1,7 +1,7 @@
 /**
  * @file mock/mock_auplay.c Mock audio player
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <re.h>
 #include <rem.h>
@@ -10,14 +10,13 @@
 
 
 struct auplay_st {
-	const struct auplay *ap;      /* inheritance */
-
 	struct tmr tmr;
 	struct auplay_prm prm;
 	void *sampv;
 	size_t sampc;
 	auplay_write_h *wh;
 	void *arg;
+	const char *device;
 };
 
 
@@ -25,21 +24,6 @@ static struct {
 	mock_sample_h *sampleh;
 	void *arg;
 } mock;
-
-
-static void tmr_handler(void *arg)
-{
-	struct auplay_st *st = arg;
-
-	tmr_start(&st->tmr, st->prm.ptime, tmr_handler, st);
-
-	if (st->wh)
-		st->wh(st->sampv, st->sampc, st->arg);
-
-	/* feed the audio-samples back to the test */
-	if (mock.sampleh)
-		mock.sampleh(st->sampv, st->sampc, mock.arg);
-}
 
 
 static void auplay_destructor(void *arg)
@@ -51,13 +35,31 @@ static void auplay_destructor(void *arg)
 }
 
 
+static void tmr_handler(void *arg)
+{
+	struct auplay_st *st = arg;
+	struct auframe af;
+
+	tmr_start(&st->tmr, st->prm.ptime, tmr_handler, st);
+
+	auframe_init(&af, st->prm.fmt, st->sampv, st->sampc, st->prm.srate,
+		     st->prm.ch);
+
+	if (st->wh)
+		st->wh(&af, st->arg);
+
+	/* feed the audio-samples back to the test */
+	if (mock.sampleh)
+		mock.sampleh(&af, st->device, mock.arg);
+}
+
+
 static int mock_auplay_alloc(struct auplay_st **stp, const struct auplay *ap,
 			    struct auplay_prm *prm, const char *device,
 			    auplay_write_h *wh, void *arg)
 {
 	struct auplay_st *st;
 	int err = 0;
-	(void)device;
 
 	if (!stp || !ap || !prm)
 		return EINVAL;
@@ -66,10 +68,10 @@ static int mock_auplay_alloc(struct auplay_st **stp, const struct auplay *ap,
 	if (!st)
 		return ENOMEM;
 
-	st->ap   = ap;
 	st->prm  = *prm;
 	st->wh   = wh;
 	st->arg  = arg;
+	st->device = device;
 
 	st->sampc = prm->srate * prm->ch * prm->ptime / 1000;
 

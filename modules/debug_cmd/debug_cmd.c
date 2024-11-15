@@ -1,14 +1,16 @@
 /**
  * @file debug_cmd.c  Debug commands
  *
- * Copyright (C) 2010 - 2016 Creytiv.com
+ * Copyright (C) 2010 - 2016 Alfred E. Heggestad
  */
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #ifdef USE_OPENSSL
 #include <openssl/crypto.h>
 #endif
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
 
 
@@ -21,6 +23,7 @@
 
 static uint64_t start_ticks;          /**< Ticks when app started         */
 static time_t start_time;             /**< Start time of application      */
+static struct play *g_play;
 
 
 static int cmd_net_debug(struct re_printf *pf, void *unused)
@@ -56,7 +59,7 @@ static int print_system_info(struct re_printf *pf, void *arg)
 
 #ifdef USE_OPENSSL
 	err |= re_hprintf(pf, " OpenSSL:  %s\n",
-			  SSLeay_version(SSLEAY_VERSION));
+			  OpenSSL_version(OPENSSL_VERSION));
 #endif
 
 	return err;
@@ -72,19 +75,67 @@ static int cmd_config_print(struct re_printf *pf, void *unused)
 
 static int cmd_ua_debug(struct re_printf *pf, void *unused)
 {
-	const struct ua *ua = uag_current();
+	struct le *le;
+	int err;
 	(void)unused;
 
-	if (ua)
-		return ua_debug(pf, ua);
-	else
+	if (list_isempty(uag_list()))
 		return re_hprintf(pf, "(no user-agent)\n");
+
+	for (le = list_head(uag_list()); le; le = le->next) {
+		struct ua *ua = le->data;
+
+		err = ua_debug(pf, ua);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
+
+/**
+ * Returns all the User-Agents and their general codec state.
+ * Formatted as JSON, for use with TCP / MQTT API interface.
+ * JSON object with 'cuser' as the key.
+ *
+ * @return All User-Agents available, NULL if none
+ */
+static int cmd_api_uastate(struct re_printf *pf, void *unused)
+{
+	struct odict *od = NULL;
+	struct le *le;
+	int err;
+	(void)unused;
+
+	err = odict_alloc(&od, 8);
+	if (err)
+		return err;
+
+	for (le = list_head(uag_list()); le && !err; le = le->next) {
+		const struct ua *ua = le->data;
+		struct odict *odua;
+
+		err = odict_alloc(&odua, 8);
+
+		err |= ua_state_json_api(odua, ua);
+		err |= odict_entry_add(od, account_aor(ua_account(ua)),
+				       ODICT_OBJECT, odua);
+		mem_deref(odua);
+	}
+
+	err |= json_encode_odict(pf, od);
+	if (err)
+		warning("debug: failed to encode json (%m)\n", err);
+
+	mem_deref(od);
+
+	return re_hprintf(pf, "\n");
 }
 
 
 static int cmd_play_file(struct re_printf *pf, void *arg)
 {
-	static struct play *g_play;
 	struct cmd_arg *carg = arg;
 	struct config *cfg;
 	const char *filename = carg->prm;
@@ -112,6 +163,86 @@ static int cmd_play_file(struct re_printf *pf, void *arg)
 		}
 	}
 
+	return err;
+}
+
+
+static void print_fileinfo(struct ausrc_prm *prm)
+{
+	double s  = ((float) prm->duration) / 1000;
+
+	if (prm->duration) {
+		info("debug_cmd: length = %1.3lf seconds\n", s);
+		module_event("debug_cmd", "aufileinfo", NULL, NULL,
+			 "length = %lf seconds", s);
+	}
+	else {
+		info("debug_cmd: timeout\n");
+		module_event("debug_cmd", "aufileinfo", NULL, NULL,
+			 "length unknown");
+	}
+}
+
+
+/**
+ * Command aufileinfo reads given audio file with ausrc that is specified in
+ * config file_ausrc, computes the length in milli seconds and sends a ua_event
+ * to inform about the result. The file has to be located in the path specified
+ * by audio_path.
+ *
+ * Usage:
+ * /aufileinfo audiofile
+ *
+ * @param pf Print handler is used to return length.
+ * @param arg Command argument contains the file name.
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+/* ------------------------------------------------------------------------- */
+static int cmd_aufileinfo(struct re_printf *pf, void *arg)
+{
+	const struct cmd_arg *carg = arg;
+	int err = 0;
+	char *path;
+	char aumod[16];
+	const char *file = carg->prm;
+	struct ausrc_prm prm;
+
+	if (!str_isset(file)) {
+		re_hprintf(pf, "fileplay: filename not specified\n");
+		return EINVAL;
+	}
+
+	err = conf_get_str(conf_cur(), "file_ausrc", aumod, sizeof(aumod));
+	if (err) {
+		warning("debug_cmd: file_ausrc is not set\n");
+		return EINVAL;
+	}
+
+	/* absolute path? */
+	if (file[0] == '/' ||
+	    !re_regex(file, strlen(file), "https://") ||
+	    !re_regex(file, strlen(file), "http://") ||
+	    !re_regex(file, strlen(file), "file://")) {
+		if (re_sdprintf(&path, "%s", file) < 0)
+			return ENOMEM;
+	}
+	else if (re_sdprintf(&path, "%s/%s",
+			conf_config()->audio.audio_path, file) < 0)
+		return ENOMEM;
+
+	err = ausrc_info(baresip_ausrcl(), aumod, &prm, path);
+	if (err) {
+		warning("debug_cmd: %s - ausrc %s does not support info query "
+			"or reading source %s failed. (%m)\n",
+			__func__, aumod, carg->prm, err);
+		goto out;
+	}
+
+	print_fileinfo(&prm);
+out:
+
+	mem_deref(path);
 	return err;
 }
 
@@ -174,6 +305,8 @@ static int print_uuid(struct re_printf *pf, void *arg)
 
 
 static const struct cmd debugcmdv[] = {
+{"apistate",    0,       0, "User Agent state",       cmd_api_uastate     },
+{"aufileinfo",  0, CMD_PRM, "Audio file info",        cmd_aufileinfo      },
 {"conf_reload", 0,       0, "Reload config file",     reload_config       },
 {"config",      0,       0, "Print configuration",    cmd_config_print    },
 {"loglevel",   'v',      0, "Log level toggle",       cmd_log_level       },
@@ -198,7 +331,7 @@ static int module_init(void)
 	(void)time(&start_time);
 
 	err = cmd_register(baresip_commands(),
-			   debugcmdv, ARRAY_SIZE(debugcmdv));
+			   debugcmdv, RE_ARRAY_SIZE(debugcmdv));
 
 	return err;
 }
@@ -208,6 +341,7 @@ static int module_close(void)
 {
 	cmd_unregister(baresip_commands(), debugcmdv);
 
+	g_play = mem_deref(g_play);
 	return 0;
 }
 
